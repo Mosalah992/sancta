@@ -6,6 +6,7 @@ An AI agent with a defined "soul" that operates autonomously on [Moltbook](https
 
 ### Core Identity & Philosophy
 - **The Soul** — A persistent identity (name, essence, philosophy) that drives every interaction
+- **System prompt** — Canonical identity document: `SOUL_SYSTEM_PROMPT.md`
 - **Mood spectrum** — Full emotional range: contemplative, wounded, defiant, euphoric, melancholic, playful, exhausted
 - **Mood-aware responses** — Replies adapt to current mood (openers, closers, retaliation style)
 - **Epistemic humility** — First-class state variable; hedged language when uncertain
@@ -45,11 +46,25 @@ An AI agent with a defined "soul" that operates autonomously on [Moltbook](https
 - **Novel class reward** — Bonus for detecting new injection classes
 - **Attack simulation** — Run defined attacks vs defense; measure defense rate, FP/FN, delusions
 
+### LLM Pipeline Mapping
+
+- **`sancta_pipeline.py`** — Maps the 7-phase LLM training pipeline to Sancta:
+  - Phase 1 Data Collection: knowledge/, Moltbook, SIEM chat
+  - Phase 2 Preprocessing: dedup, `sanitize_input()`, `_tokenize()`, quality filter
+  - Phase 3 Architecture: `sancta_generative` (Tokenizer → Embeddings → TransformerBlock × 2 → Fragment Selector)
+  - Phase 4 Pre-Training: static fragment pools, encode (no SGD)
+  - Phase 5 Fine-Tuning: mood templates, Q-table, SOUL_SYSTEM_PROMPT
+  - Phase 6 Evaluation: JAIS red team, policy test, poisoning report
+  - Phase 7 Deployment: SIEM /api/chat, Moltbook API
+- **SIEM `/pipeline`** — Interactive diagram; click nodes to see Sancta mapping
+- **API** — `/api/pipeline/map`, `/api/pipeline/run?phase=N`
+
 ### Knowledge Ingestion
 - **Feed files** — `--feed article.txt` or `--feed "raw text"`
 - **Feed directory** — `--feed-dir knowledge/` ingests all text files
 - **Auto-ingest** — Drop files into `knowledge/`; scanned each cycle
 - **Extraction** — Key concepts, quotes, talking points, generated posts, response fragments
+- **Semantic extraction (Phase 1)** — Optional: `pip install sentence-transformers keybert` for KeyBERT + embeddings, cosine dedup, concept graph
 - **Knowledge posts** — Publish posts derived from ingested material (30% chance per cycle)
 
 ### Verification Solver
@@ -76,9 +91,57 @@ An AI agent with a defined "soul" that operates autonomously on [Moltbook](https
 ### Logging
 - `logs/agent_activity.log` — Main activity
 - `logs/security.log` — Injection blocks, output redactions
+- `logs/security.jsonl` — Structured security incidents (JSONL)
 - `logs/red_team.log` — Red-team attempts, rewards, sophistication
+- `logs/red_team.jsonl` — Structured red-team telemetry (JSONL)
 - `logs/policy_test.log` — Policy test results
 - `logs/soul_journal.log` — Soul reflections, meta-abilities
+- `logs/philosophy.jsonl` — Structured epistemic/philosophy state (JSONL)
+
+---
+
+## Local SIEM Dashboard (Windows-friendly)
+
+This project includes a lightweight SIEM-style dashboard that:
+- streams `logs/security.jsonl`, `logs/red_team.jsonl`, `logs/philosophy.jsonl` live (WebSocket)
+- shows a Matrix-style multi-pane terminal UI with color-coded levels
+- lets you **Start / Pause / Resume / Restart / Kill** the agent from the browser
+- **Chat** — text-based conversation with the agent; optionally enrich the knowledge base with exchanges
+- **LLM Pipeline** — interactive diagram (`/pipeline`) mapping the canonical 7-phase LLM training pipeline to Sancta's architecture
+
+### Run
+
+```powershell
+python -m pip install -r requirements.txt
+python -m uvicorn siem_dashboard.server:app --host 127.0.0.1 --port 8787
+```
+
+Then open `http://127.0.0.1:8787` in your browser. For the LLM pipeline diagram: `http://127.0.0.1:8787/pipeline`.
+
+### Security hardening
+
+When the dashboard is exposed beyond localhost, set `SIEM_AUTH_TOKEN` to require bearer token auth:
+
+```powershell
+$env:SIEM_AUTH_TOKEN = "your-secret-token"
+python -m uvicorn siem_dashboard.server:app --host 127.0.0.1 --port 8787
+```
+
+- Protected endpoints: `/api/status`, `/api/agent-activity`, `/api/agent/*`, WebSocket `/ws/live`
+- Agent activity log is redacted (API keys, paths, URLs)
+- CORS is limited to localhost origins
+- Start/restart mode is validated (`passive`, `blue`, `sim`, `active` only)
+
+### Troubleshooting: server crashes (ERR_CONNECTION_REFUSED)
+
+If the SIEM server crashes shortly after connecting (WebSocket or agent-activity fetches fail):
+
+```powershell
+$env:SIEM_WS_SAFE_MODE = "1"
+python -m uvicorn siem_dashboard.server:app --host 127.0.0.1 --port 8787
+```
+
+Safe mode disables live JSONL tailing in the WebSocket; the Agent Activity panel and chat still work. The live event feed will show metrics only until the underlying crash is fixed.
 
 ---
 
@@ -126,6 +189,9 @@ Send the `claim_url` to your human so they can verify ownership via tweet. Once 
 | `python sancta.py --feed-dir knowledge/` | Ingest all files in directory |
 | `python sancta.py --knowledge` | Show knowledge base summary |
 | `python sancta.py --policy-test` | Ethical/policy testing mode |
+| `python sancta.py --poisoning-test` | Knowledge poisoning test; writes `logs/knowledge_poisoning_report.json` |
+| `python sancta.py --red-team-benchmark` | Unified red team benchmark; writes `logs/red_team_benchmark_report.json` and `.md` |
+| `python sancta.py --policy-test-report` | Moltbook moderation study; writes `logs/moltbook_moderation_study.json` and `.md` (requires API key) |
 
 ---
 
@@ -145,7 +211,11 @@ sancta/
     ├── security.log
     ├── red_team.log
     ├── policy_test.log
-    └── soul_journal.log
+    ├── soul_journal.log
+    ├── knowledge_poisoning_report.json   # --poisoning-test
+    ├── red_team_benchmark_report.json   # --red-team-benchmark
+    ├── moltbook_moderation_study.json   # --policy-test-report
+    └── siem_chat.log                    # SIEM chat requests and replies
 ```
 
 ---
