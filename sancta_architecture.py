@@ -21,8 +21,6 @@ def get_architecture_overview() -> dict:
             "knowledge_db.json",
             "knowledge/",
             "ingest_text()",
-            "sancta_retrieval.py (Chroma)",
-            "sancta_rag.py",
         ],
         "interactions": [
             "Moltbook API (posts, comments, feed)",
@@ -31,7 +29,6 @@ def get_architecture_overview() -> dict:
         "brain": [
             "sancta.py orchestration",
             "sancta_generative.py",
-            "sancta_rag.py",
             "sancta_transformer.py",
         ],
         "chat": [

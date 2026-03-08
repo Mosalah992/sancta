@@ -5,13 +5,7 @@ uvicorn[standard]>=0.30.0
 psutil>=5.9.0
 pygame>=2.5.0
 
-# SANCTA Learning Architecture — Phase 1 (semantic representation)
-sentence-transformers>=2.2.0
-keybert>=0.8.0
-numpy>=1.24.0
-
-# SANCTA Neural Integration — RAG, LoRA, Learnable Transformer
-chromadb>=0.4.0
+# SANCTA Neural Integration — LoRA, Learnable Transformer (RAG/embeddings removed)
 torch>=2.0.0
 transformers>=4.36.0
 peft>=0.7.0

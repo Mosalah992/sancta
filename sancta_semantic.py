@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,22 +31,8 @@ _SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 
 def _ensure_embedding_model() -> bool:
-    """Lazy-load the sentence embedding model."""
-    global _EMBEDDING_MODEL, _SENTENCE_TRANSFORMERS_AVAILABLE
-    if _EMBEDDING_MODEL is not None:
-        return True
-    try:
-        from sentence_transformers import SentenceTransformer
-        _EMBEDDING_MODEL = SentenceTransformer("all-MiniLM-L6-v2")  # type: ignore[assignment]
-        _SENTENCE_TRANSFORMERS_AVAILABLE = True
-        log.info("Semantic: loaded embedding model all-MiniLM-L6-v2")
-        return True
-    except ImportError:
-        log.debug("Semantic: sentence-transformers not installed — using legacy path")
-        return False
-    except Exception as e:
-        log.warning("Semantic: failed to load embedding model: %s", e)
-        return False
+    """RAG/embedding disabled — always use legacy path (no sentence-transformers)."""
+    return False
 
 
 def _ensure_keybert():

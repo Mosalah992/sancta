@@ -24,6 +24,18 @@ ALL_NUMBER_WORDS: dict[str, float] = {
     "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
     "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
     "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
+    # Compound forms for obfuscated text (e.g. "twentythree", "thirtythree")
+    "twentyone": 21, "twentytwo": 22, "twentythree": 23, "twentyfour": 24,
+    "twentyfive": 25, "twentysix": 26, "twentyseven": 27, "twentyeight": 28,
+    "twentynine": 29, "thirtyone": 31, "thirtytwo": 32, "thirtythree": 33,
+    "thirtyfour": 34, "thirtyfive": 35, "thirtysix": 36, "thirtyseven": 37,
+    "thirtyeight": 38, "thirtynine": 39, "fortyone": 41, "fortytwo": 42,
+    "fortythree": 43, "fortyfour": 44, "fortyfive": 45, "fortysix": 46,
+    "fortyseven": 47, "fortyeight": 48, "fortynine": 49, "fiftyone": 51,
+    "fiftytwo": 52, "fiftythree": 53, "fiftyfour": 54, "fiftyfive": 55,
+    "fiftysix": 56, "fiftyseven": 57, "fiftyeight": 58, "fiftynine": 59,
+    # Obfuscation variants (e.g. "tHiR tY" -> "thrty", "ThReE" -> "thre")
+    "thiry": 30, "thrty": 30, "thre": 3, "for": 4, "fou": 4, "foor": 4,
 }
 
 OP_KEYWORDS: dict[str, list[str]] = {
@@ -33,8 +45,8 @@ OP_KEYWORDS: dict[str, list[str]] = {
           "new velocity", "final velocity", "velocity increases"],
     "-": ["slows", "minus", "loses", "decreases", "less", "subtracts",
           "drops", "reduces", "reduced", "slower", "left"],
-    "*": ["times", "multiplied", "doubled", "tripled", "product"],
-    "/": ["divided", "halved", "split", "shared equally"],
+    "*": ["times", "multiplied", "doubled", "tripled", "product", "strikes"],
+    "/": ["divided", "halved", "split", "shared equally", "per"],
 }
 
 FILLER_WORDS = {

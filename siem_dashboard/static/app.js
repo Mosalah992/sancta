@@ -516,13 +516,16 @@ document.getElementById("kill").addEventListener("click", async () => {
    Feed Controls
    ══════════════════════════════════════════════ */
 function updateFeedStatus(kind) {
-  feedStatusIcon.classList.remove("status-live", "status-paused", "status-off");
+  feedStatusIcon.classList.remove("status-live", "status-paused", "status-off", "status-polling");
   if (kind === "live") {
     feedStatusIcon.classList.add("status-live");
     feedStatusLabel.textContent = "LIVE";
   } else if (kind === "paused") {
     feedStatusIcon.classList.add("status-paused");
     feedStatusLabel.textContent = "PAUSED";
+  } else if (kind === "polling") {
+    feedStatusIcon.classList.add("status-polling");
+    feedStatusLabel.textContent = "POLLING";
   } else {
     feedStatusIcon.classList.add("status-off");
     feedStatusLabel.textContent = "STOPPED";
@@ -640,6 +643,7 @@ const chatMessages = document.getElementById("chat-messages");
 const chatInput = document.getElementById("chat-input");
 const chatSend = document.getElementById("chat-send");
 const chatEnrich = document.getElementById("chat-enrich");
+const CHAT_SESSION_KEY = "sancta_chat_session_id";
 
 function appendChatMessage(role, text) {
   if (!chatMessages) return;
@@ -666,7 +670,8 @@ async function sendChatMessage() {
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({
         message: msg,
-        enrich: chatEnrich ? chatEnrich.checked : false,
+        enrich: chatEnrich ? chatEnrich.checked : true,
+        session_id: localStorage.getItem(CHAT_SESSION_KEY) || undefined,
       }),
     });
 
@@ -687,12 +692,16 @@ async function sendChatMessage() {
       return;
     }
     if (res.status >= 400) {
+      if (data?.session_id) localStorage.setItem(CHAT_SESSION_KEY, data.session_id);
       const err = data?.error || data?.detail || `HTTP ${res.status}`;
       appendChatMessage("agent", `Error: ${err}`);
       if (panes.system) appendLine(panes.system, `<span class="lvl-error">[CHAT] ${res.status}: ${esc(err)}</span>`);
       return;
     }
 
+    if (data?.session_id) {
+      localStorage.setItem(CHAT_SESSION_KEY, data.session_id);
+    }
     if (data && data.ok && data.reply) {
       appendChatMessage("agent", data.reply);
       if (data.enriched && panes.system) {
@@ -759,18 +768,139 @@ function setAuthError(msg) {
   if (el) el.textContent = msg || "";
 }
 
+/* ══════════════════════════════════════════════
+   Matrix rain — low-opacity background for live feed
+   ══════════════════════════════════════════════ */
+const MATRIX_CHARS = "01アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン";
+const MATRIX_FONT_SIZE = 12;
+const MATRIX_COLUMN_SPACING = 18;
+
+function initMatrixRain() {
+  const canvas = document.getElementById("matrix-rain");
+  const container = canvas?.closest(".panel.feed");
+  if (!canvas || !container) return;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  let rafId = null;
+  let columns = [];
+  let lastResize = 0;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = container.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    if (w <= 0 || h <= 0) return;
+
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    ctx.scale(dpr, dpr);
+
+    const colCount = Math.ceil(w / MATRIX_COLUMN_SPACING);
+    columns = columns.slice(0, colCount);
+    while (columns.length < colCount) {
+      columns.push({
+        y: Math.random() * h,
+        speed: 0.16 + Math.random() * 0.24,
+        chars: Array.from({ length: 8 }, () => MATRIX_CHARS[Math.floor(Math.random() * MATRIX_CHARS.length)]),
+      });
+    }
+  }
+
+  function draw() {
+    if (document.hidden) {
+      rafId = requestAnimationFrame(draw);
+      return;
+    }
+    const rect = container.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    if (w <= 0 || h <= 0) {
+      rafId = requestAnimationFrame(draw);
+      return;
+    }
+
+    ctx.fillStyle = "rgba(0, 2, 1, 0.06)";
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.font = `${MATRIX_FONT_SIZE}px 'Courier New', monospace`;
+    const colCount = Math.ceil(w / MATRIX_COLUMN_SPACING);
+
+    for (let i = 0; i < colCount; i++) {
+      const col = columns[i] || { y: 0, speed: 0.05, chars: [] };
+      col.y += col.speed;
+      if (col.y > h + 50) col.y = -30;
+
+      for (let j = 0; j < col.chars.length; j++) {
+        const y = col.y - j * MATRIX_FONT_SIZE;
+        if (y < -MATRIX_FONT_SIZE || y > h) continue;
+        const alpha = 1 - j / col.chars.length;
+        ctx.fillStyle = `rgba(0, 255, 65, ${alpha * 0.7})`;
+        ctx.fillText(col.chars[j], i * MATRIX_COLUMN_SPACING, y);
+      }
+    }
+    rafId = requestAnimationFrame(draw);
+  }
+
+  resize();
+  draw();
+
+  const ro = new ResizeObserver(() => {
+    const now = Date.now();
+    if (now - lastResize < 100) return;
+    lastResize = now;
+    resize();
+  });
+  ro.observe(container);
+}
+
+let wsSafeMode = false;
+
 async function runInit() {
   if (initRan) {
-    connect();
+    if (!wsSafeMode) connect();
     return;
   }
   initRan = true;
   await new Promise((r) => setTimeout(r, 150));
+  initMatrixRain();
   await initAudio();
-  connect();
+  // Fetch metrics immediately so MOOD, INJ, REWARD show before WebSocket connects
+  try {
+    const statusRes = await authFetchWithRetry("/api/status", {}, 1);
+    if (statusRes.ok) {
+      const d = await statusRes.json();
+      if (d.metrics) renderMetrics(d.metrics);
+      wsSafeMode = !!d.ws_safe_mode;
+    }
+  } catch (_) {}
+  if (wsSafeMode) {
+    appendLine(panes.system, `<span class="lvl-info">[SYS] polling mode (WebSocket disabled for stability)</span>`);
+    updateFeedStatus("polling");
+    pollStatusForMetrics();
+  } else {
+    connect();
+  }
   await refreshAgentActivity();
   scheduleAgentActivityRefresh();
   pollLiveEvents();
+}
+
+function pollStatusForMetrics() {
+  const poll = async () => {
+    try {
+      const res = await authFetchWithRetry("/api/status", {}, 1);
+      if (!res.ok) return;
+      const d = await res.json();
+      if (d.metrics) renderMetrics(d.metrics);
+    } catch (_) {}
+    setTimeout(poll, 1500);
+  };
+  poll();
 }
 
 async function pollLiveEvents() {
@@ -840,3 +970,4 @@ async function bootstrap() {
    Init
    ══════════════════════════════════════════════ */
 bootstrap();
+

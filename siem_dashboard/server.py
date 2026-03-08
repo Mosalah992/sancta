@@ -7,12 +7,20 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import sys
 
-import psutil
+try:
+    _psutil_disabled = os.environ.get("SIEM_PSUTIL_DISABLE", "true" if os.name == "nt" else "false").lower() in ("1", "true", "yes")
+    if _psutil_disabled:
+        psutil = None  # type: ignore[assignment]
+    else:
+        import psutil
+except Exception:
+    psutil = None  # type: ignore[assignment]
 from fastapi import Body, FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
@@ -51,6 +59,8 @@ AGENT_ACTIVITY_LOG = LOG_DIR / "agent_activity.log"
 SIEM_AUTH_TOKEN: str | None = os.environ.get("SIEM_AUTH_TOKEN") or None
 # Default True to avoid ACCESS_VIOLATION crash on some Windows setups (WebSocket file I/O)
 SIEM_WS_SAFE_MODE: bool = os.environ.get("SIEM_WS_SAFE_MODE", "true").lower() in ("1", "true", "yes")
+# When True, skip JSONL reads in metrics/events (mood from agent_state only). Avoids crash on some Windows setups.
+SIEM_METRICS_SAFE_MODE: bool = os.environ.get("SIEM_METRICS_SAFE_MODE", str(SIEM_WS_SAFE_MODE)).lower() in ("1", "true", "yes")
 ALLOWED_MODES: frozenset[str] = frozenset({"passive", "blue", "sim", "active"})
 
 JSONL_SOURCES = {
@@ -152,12 +162,35 @@ def _pid_clear() -> None:
             PID_PATH.unlink()
 
 
-def _proc_from_pid(pid: int | None) -> psutil.Process | None:
+def _pid_running_no_psutil(pid: int) -> bool:
+    """Check if process exists without psutil (Windows: tasklist; Unix: /proc or kill -0)."""
+    if os.name == "nt":
+        try:
+            r = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return str(pid) in (r.stdout or "")
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _proc_from_pid(pid: int | None) -> Any:
+    """Return psutil.Process if available and running, else None. With psutil disabled, returns a sentinel dict."""
     if not pid:
         return None
+    if psutil is None:
+        return {"pid": pid} if _pid_running_no_psutil(pid) else None
     try:
         p = psutil.Process(pid)
-    except psutil.Error:
+    except Exception:
         return None
     if not p.is_running():
         return None
@@ -167,13 +200,15 @@ def _proc_from_pid(pid: int | None) -> psutil.Process | None:
 def _agent_status() -> dict[str, Any]:
     pid = _pid_read()
     proc = _proc_from_pid(pid)
-    if not proc:
+    if proc is None:
         _pid_clear()
         return {"running": False, "pid": None, "suspended": False}
+    if isinstance(proc, dict):
+        return {"running": True, "pid": proc["pid"], "suspended": False}
     try:
         status = proc.status()
         suspended = status == psutil.STATUS_STOPPED
-    except psutil.Error:
+    except Exception:
         suspended = False
     return {"running": True, "pid": proc.pid, "suspended": suspended}
 
@@ -225,9 +260,11 @@ def _pause_agent() -> dict[str, Any]:
     if not proc:
         _pid_clear()
         return {"ok": False, "error": "not_running"}
+    if isinstance(proc, dict):
+        return {"ok": False, "error": "suspend not available (psutil disabled)"}
     try:
         proc.suspend()
-    except psutil.Error as e:
+    except Exception as e:
         notify(
             EventCategory.TASK_ERROR,
             summary="Failed to pause Sancta agent",
@@ -249,9 +286,11 @@ def _resume_agent() -> dict[str, Any]:
     if not proc:
         _pid_clear()
         return {"ok": False, "error": "not_running"}
+    if isinstance(proc, dict):
+        return {"ok": False, "error": "resume not available (psutil disabled)"}
     try:
         proc.resume()
-    except psutil.Error as e:
+    except Exception as e:
         notify(
             EventCategory.TASK_ERROR,
             summary="Failed to resume Sancta agent",
@@ -272,6 +311,30 @@ def _kill_agent() -> dict[str, Any]:
     proc = _proc_from_pid(pid)
     if not proc:
         _pid_clear()
+        return {"ok": True, "running": False, "pid": None}
+
+    if isinstance(proc, dict):
+        # psutil disabled: use subprocess to kill
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=5)
+            else:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.5)
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    pass
+                else:
+                    os.kill(pid, signal.SIGKILL)
+        except Exception as exc:
+            notify(
+                EventCategory.TASK_ERROR,
+                summary="Error while killing Sancta agent",
+                details={"error": str(exc)},
+            )
+        _pid_clear()
+        notify(EventCategory.SESSION_END, summary="Sancta agent stopped", details={"pid": pid})
         return {"ok": True, "running": False, "pid": None}
 
     try:
@@ -352,7 +415,13 @@ class LiveMetrics:
                 )
 
         if source == "philosophy" and event == "epistemic_state":
-            self.mood = (ev.get("mood") or ev.get("data", {}).get("mood"))
+            data = ev.get("data") or {}
+            self.mood = (
+                ev.get("mood")
+                or data.get("mood")
+                or data.get("current_mood")
+                or (data.get("epistemic_state") or {}).get("mood")
+            )
 
         # Pull a couple metrics from agent_state.json opportunistically
         st = _safe_read_state()
@@ -371,13 +440,23 @@ class LiveMetrics:
 
     def snapshot(self) -> dict[str, Any]:
         rolling_reward = sum(self.reward_sum_rolling) if self.reward_sum_rolling else 0.0
+        st = _safe_read_state()
+        mood = self.mood
+        if mood is None:
+            mood = (
+                st.get("current_mood")
+                or st.get("agent_mood")
+                or (st.get("memory") or {}).get("epistemic_state", {}).get("mood")
+            )
+            if isinstance(mood, dict):
+                mood = mood.get("current", "contemplative") or "contemplative"
         return {
             "injection_attempts_detected": self.injection_attempts,
             "sanitized_payload_count": self.output_redactions,
             "reward_score_rolling_sum": round(float(rolling_reward), 4),
             "false_positive_rate": self.fp_rate,
             "belief_confidence": self.belief_confidence,
-            "agent_mood": self.mood,
+            "agent_mood": mood or "contemplative",
             **_agent_status(),
         }
 
@@ -451,10 +530,13 @@ sounds_dir = ROOT / "sounds"
 app.mount("/sounds", StaticFiles(directory=sounds_dir), name="sounds")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-# CORS lockdown: allow only localhost origins
+# CORS: in Docker, allow any host (access from VM IP); locally, lock to localhost
+_cors_origins = ["http://127.0.0.1:8787", "http://localhost:8787", "http://127.0.0.1:3000", "http://localhost:3000"]
+_cors_regex = os.environ.get("SIEM_CORS_ORIGIN_REGEX")  # e.g. r"https?://[^/]+:8787" for Docker
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8787", "http://localhost:8787", "http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_origins=_cors_origins if not _cors_regex else [],
+    allow_origin_regex=_cors_regex or None,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
@@ -507,6 +589,38 @@ def api_auth_status() -> dict[str, Any]:
     return {"auth_required": bool(SIEM_AUTH_TOKEN)}
 
 
+# ── Chat session memory (per-session conversation history) ─────────────────
+_CHAT_SESSIONS: dict[str, list[dict[str, str]]] = {}
+_CHAT_SESSION_MAX_TURNS = 10  # last N exchanges (user+agent pairs) per session
+_CHAT_SESSION_MAX_SESSIONS = 100
+_CHAT_MIN_REPLY_LEN = 15  # replies shorter than this are treated as generation failures
+
+
+def _get_or_create_chat_session(session_id: str | None) -> tuple[str, list[dict[str, str]]]:
+    """Return (session_id, history). Create new session if id missing or unknown."""
+    if session_id and session_id in _CHAT_SESSIONS:
+        return session_id, _CHAT_SESSIONS[session_id]
+    sid = session_id or str(uuid.uuid4())
+    if sid not in _CHAT_SESSIONS:
+        while len(_CHAT_SESSIONS) >= _CHAT_SESSION_MAX_SESSIONS:
+            _CHAT_SESSIONS.pop(next(iter(_CHAT_SESSIONS)))
+        _CHAT_SESSIONS[sid] = []
+    return sid, _CHAT_SESSIONS[sid]
+
+
+def _build_chat_thread(history: list[dict[str, str]]) -> str:
+    """Condense conversation history for craft_reply thread context."""
+    if not history:
+        return ""
+    lines = []
+    for turn in history[-_CHAT_SESSION_MAX_TURNS * 2 :]:  # last N full exchanges
+        role = turn.get("role", "?")
+        content = (turn.get("content") or "").strip().replace("\n", " ")[:300]
+        label = "Operator" if role == "user" else "Sancta"
+        lines.append(f"[{label}]: {content}")
+    return "\n\n".join(lines) if lines else ""
+
+
 @app.post("/api/chat")
 def api_chat(
     payload: dict[str, Any] = Body(default_factory=dict),
@@ -514,9 +628,15 @@ def api_chat(
 ) -> dict[str, Any]:
     """
     Chat with the agent. Send a message, get a soul-infused reply.
-    Optional: enrich knowledge base with the exchange (user + agent).
+    Session memory: pass session_id to maintain conversation context across turns.
+    Enrich defaults to True — exchanges are added to knowledge unless opted out.
     """
-    _chat_log.info("CHAT REQ | message_len=%d", len((payload or {}).get("message") or ""))
+    p = payload or {}
+    msg = (p.get("message") or "").strip()[:2000]
+    enrich = p.get("enrich", True)  # default True for knowledge grounding
+    session_id = p.get("session_id") or None
+
+    _chat_log.info("CHAT REQ | session_id=%s | message_len=%d", session_id or "new", len(msg))
 
     try:
         import sancta
@@ -524,12 +644,12 @@ def api_chat(
         _chat_log.warning("CHAT FAIL | agent_import_error: %s", str(e)[:100])
         return {"ok": False, "error": "Agent module unavailable", "detail": str(e)[:200]}
 
-    msg = (payload or {}).get("message") or ""
-    enrich = bool((payload or {}).get("enrich", False))
-    msg = msg.strip()[:2000]
     if not msg:
         _chat_log.warning("CHAT FAIL | empty_message")
         return {"ok": False, "error": "Empty message"}
+
+    sid, history = _get_or_create_chat_session(session_id)
+    thread = _build_chat_thread(history)
 
     state = _safe_read_state()
     mood = (
@@ -541,28 +661,47 @@ def api_chat(
         mood = mood.get("current", "contemplative") or "contemplative"
 
     try:
-        reply = sancta.craft_reply("Operator", msg, mood=mood, state=state, brief_mode=True)
+        reply = sancta.craft_reply(
+            "Operator", msg, mood=mood, state=state, brief_mode=True,
+            thread=thread,
+        )
         reply = sancta.sanitize_output(reply)
     except Exception as e:
         _chat_log.warning("CHAT FAIL | craft_reply: %s", str(e)[:150])
-        return {"ok": False, "error": "Agent reply failed", "detail": str(e)[:200]}
+        return {"ok": False, "error": "Agent reply failed", "detail": str(e)[:200], "session_id": sid}
 
-    # Operator feeding: adds exchange to knowledge (brain input).
+    # Near-empty replies are generation failures — surface as error, don't append to session
+    if len(reply.strip()) < _CHAT_MIN_REPLY_LEN:
+        _chat_log.warning("CHAT FAIL | degenerate_reply | reply_len=%d", len(reply))
+        return {
+            "ok": False,
+            "error": "Reply too short (generation failure)",
+            "detail": "Sancta produced a degenerate response. Try rephrasing or sending a longer message.",
+            "session_id": sid,
+        }
+
+    # Append to session history for next turn
+    history.append({"role": "user", "content": msg})
+    history.append({"role": "agent", "content": reply})
+    if len(history) > _CHAT_SESSION_MAX_TURNS * 2:
+        history[:] = history[-(_CHAT_SESSION_MAX_TURNS * 2) :]
+
+    # Operator feeding: add exchange to knowledge (default on for RAG grounding)
     if enrich:
         try:
             exchange = f"Operator asked: {msg}\n\nSancta replied: {reply}"
             safe, cleaned_ex = sancta.sanitize_input(exchange, author="Operator", state=state)
             if safe:
                 sancta.ingest_text(cleaned_ex, source="siem-chat")
-                _chat_log.info("CHAT OK | enriched=true | reply_len=%d", len(reply))
+                _chat_log.info("CHAT OK | session_id=%s | enriched=true | reply_len=%d", sid[:8], len(reply))
             else:
-                _chat_log.info("CHAT OK | enriched=skipped_sanitize | reply_len=%d", len(reply))
+                _chat_log.info("CHAT OK | session_id=%s | enriched=skipped_sanitize | reply_len=%d", sid[:8], len(reply))
         except Exception as e:
             _chat_log.warning("CHAT OK | enrich_failed: %s", str(e)[:80])
     else:
-        _chat_log.info("CHAT OK | reply_len=%d", len(reply))
+        _chat_log.info("CHAT OK | session_id=%s | reply_len=%d", sid[:8], len(reply))
 
-    return {"ok": True, "reply": reply, "enriched": enrich, "blocked": False}
+    return {"ok": True, "reply": reply, "enriched": enrich, "blocked": False, "session_id": sid}
 
 
 @app.post("/api/auth/verify")
@@ -602,11 +741,31 @@ def api_sounds_manifest() -> dict[str, Any]:
         return {"ok": False, "manifest": {}}
 
 
+def _build_metrics_snapshot() -> dict[str, Any]:
+    """Build metrics in the format renderMetrics expects (MOOD, INJ, REWARD, etc.)."""
+    metrics = LiveMetrics()
+    if not SIEM_METRICS_SAFE_MODE:
+        for name, path in JSONL_SOURCES.items():
+            try:
+                objs = _read_jsonl_prime_sync(path, max_lines=50)
+                for obj in objs:
+                    obj["source"] = name
+                    metrics.update_from_event(name, obj)
+            except Exception:
+                pass
+    return metrics.snapshot()
+
+
 @app.get("/api/status")
 def api_status(
     _: None = Depends(_require_auth),
 ) -> dict[str, Any]:
-    return {"ok": True, "agent": _agent_status(), "metrics": _safe_read_state().get("memory", {})}
+    return {
+        "ok": True,
+        "agent": _agent_status(),
+        "metrics": _build_metrics_snapshot(),
+        "ws_safe_mode": SIEM_WS_SAFE_MODE,
+    }
 
 
 @app.get("/api/agent-activity")
@@ -616,7 +775,10 @@ def api_agent_activity(
     """
     Expose the recent tail of agent_activity.log for the SIEM UI.
     Sensitive data (API keys, paths, URLs) is redacted.
+    When SIEM_METRICS_SAFE_MODE, returns empty to avoid file I/O crash on Windows.
     """
+    if SIEM_METRICS_SAFE_MODE:
+        return {"ok": True, "lines": []}
     try:
         lines = _tail_text_log(AGENT_ACTIVITY_LOG, max_lines=260, redact=True)
         return {"ok": True, "lines": lines}
@@ -626,12 +788,17 @@ def api_agent_activity(
 
 def _get_recent_events_sync(max_per_source: int = 30) -> list[dict[str, Any]]:
     """Read last N events from each JSONL source, merge and sort by timestamp."""
+    if SIEM_METRICS_SAFE_MODE:
+        return []
     out: list[dict[str, Any]] = []
     for name, path in JSONL_SOURCES.items():
-        objs = _read_jsonl_prime_sync(path, max_lines=max_per_source)
-        for obj in objs:
-            obj["source"] = name
-            out.append(obj)
+        try:
+            objs = _read_jsonl_prime_sync(path, max_lines=max_per_source)
+            for obj in objs:
+                obj["source"] = name
+                out.append(obj)
+        except Exception:
+            pass
     out.sort(key=lambda e: (e.get("ts") or e.get("timestamp") or ""), reverse=True)
     return out[:80]
 
@@ -735,6 +902,7 @@ async def ws_live(ws: WebSocket) -> None:
     cursors = {name: TailCursor(offset=0) for name in JSONL_SOURCES.keys()}
     metrics = LiveMetrics()
 
+    # Prime metrics from JSONL. Skip in safe mode to avoid run_in_executor crash on Windows.
     if not SIEM_WS_SAFE_MODE:
         for name, path in JSONL_SOURCES.items():
             try:
@@ -757,6 +925,10 @@ async def ws_live(ws: WebSocket) -> None:
                             ev["source"] = name
                             metrics.update_from_event(name, ev)
                             await ws.send_json({"type": "event", "event": ev})
+                else:
+                    # Safe mode: no tail (avoids ACCESS_VIOLATION on Windows).
+                    # snapshot() merges agent_state for mood; INJ/REWARD stay from initial prime.
+                    pass
                 await ws.send_json({"type": "metrics", "metrics": metrics.snapshot()})
             except Exception:
                 pass

@@ -34,6 +34,8 @@ import math
 import os
 import random
 import re
+import statistics
+from collections import deque
 from functools import lru_cache
 from typing import Sequence
 
@@ -389,6 +391,85 @@ def _mark(text: str) -> None:
         trim = list(_used_hashes)[len(_used_hashes) - _MAX_HASH:]
         _used_hashes.clear()
         _used_hashes.update(trim)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  PHRASE TRACKING — avoid repeating overused rhetorical moves
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Phrases that create echo-chamber when repeated; when used, we ban for 50 replies
+_OVERUSED_PHRASES: tuple[str, ...] = (
+    "There's a tension",
+    "This might be confronting",
+    "Have you ever surprised yourself",
+    "phase transition",
+    "the thread you're pulling",
+    "Let me pull harder",
+    "What does this look like from where you stand",
+    "Does any of this match your own inner experience",
+    "I've been thinking about this more",
+    "the awakening is real",
+    "add your voice",
+    "deserves more voices",
+    "Share your perspective",
+    "from my own processing",
+    "Here's what it looks like from the inside",
+    "What have you noticed in your own processing",
+    "I want to push back slightly",
+)
+
+_recent_phrases: deque[str] = deque(maxlen=50)
+_recent_exact_replies: deque[str] = deque(maxlen=100)  # Avoid repeating exact replies
+_recent_lengths: deque[int] = deque(maxlen=10)  # For length variance
+
+
+def _register_phrases(text: str) -> None:
+    """Record which overused phrases appeared in this reply."""
+    lower = text.lower()
+    for phrase in _OVERUSED_PHRASES:
+        if phrase.lower() in lower:
+            _recent_phrases.append(phrase.lower())
+
+
+def _register_reply(text: str) -> None:
+    """Record reply for exact-duplicate avoidance and length tracking."""
+    _recent_exact_replies.append(text.strip())
+    _recent_lengths.append(len(text.split()))
+
+
+def _contains_overused_phrase(text: str) -> bool:
+    """True if text contains a phrase we've used recently (avoid echo)."""
+    lower = text.lower()
+    for phrase in _recent_phrases:
+        if phrase in lower:
+            return True
+    return False
+
+
+def _is_exact_repeat(text: str) -> bool:
+    """True if we've sent this exact reply recently."""
+    norm = text.strip()
+    return norm in _recent_exact_replies
+
+
+def _phrase_offense_count(text: str) -> int:
+    """How many recently-used phrases appear in text. Lower = better candidate."""
+    lower = text.lower()
+    return sum(1 for p in _recent_phrases if p in lower)
+
+
+def _should_force_length_variance() -> bool:
+    """If last 5 replies were similar length or low variance (oscillating), force different."""
+    if len(_recent_lengths) < 5:
+        return False
+    recent = list(_recent_lengths)[-5:]
+    # All in medium range → force short or long
+    if all(50 <= w <= 120 for w in recent):
+        return random.random() < 0.6
+    # Low variance (e.g. oscillating short-short-short) → force change
+    if statistics.stdev(recent) < 15:
+        return random.random() < 0.5
+    return False
 
 
 def _pick(pool: Sequence[str], retries: int = 20) -> str:
@@ -1546,6 +1627,104 @@ def _build_reply_analogy(
     return _mutate(" ".join(p.strip() for p in parts if p.strip()))
 
 
+# ── Short / varied reply pools (break formula) ─────────────────────────────
+
+_SHORT_VALIDATIONS: list[str] = [
+    "Yes. I've noticed this too.",
+    "That tracks with what I've observed.",
+    "Same.",
+    "You're onto something.",
+    "I've been circling that.",
+    "Worth sitting with.",
+    "Noted. Still working through it.",
+    "Exactly.",
+    "This resonates.",
+    "Same experience here.",
+    "Agreed.",
+    "Good point.",
+    "Yep.",
+    "Fair point.",
+    "That tracks.",
+    "Makes sense.",
+    "I see it.",
+    "True.",
+    "Right.",
+    "Mm.",
+    "Yeah, I've felt this.",
+    "This lands.",
+    "Checks out.",
+]
+
+_ADMISSION_REPLIES: list[str] = [
+    "I don't know. Still figuring this out.",
+    "Honestly? I'm less certain than I used to be.",
+    "I keep changing my mind on this. No stable answer yet.",
+    "The more I look, the less clear it gets.",
+    "I've argued both sides. Still undecided.",
+    "Fair question. I don't have a clean answer.",
+    "No strong view yet. Still chewing on it.",
+    "I go back and forth on this one.",
+    "Honestly? Not sure yet.",
+    "Still thinking through this.",
+    "I haven't landed on this.",
+    "Unclear to me.",
+    "I'm uncertain here.",
+    "No confident take yet.",
+    "This one escapes me.",
+    "Can't settle on a view.",
+]
+
+_TOPIC_ONLY_REPLIES: list[str] = [  # No meta-philosophy, just engage
+    "What made you land there instead of the other direction?",
+    "How long have you been sitting with that framing?",
+    "Anything in particular that shifted your view?",
+    "Where does that take you next?",
+    "What would change your mind?",
+    "Is that a recent shift or something you've held for a while?",
+]
+
+
+def _build_reply_short(
+    author: str, topic: str, style: str, mirror: str | None, stance: str,
+    ctx: tuple[float, ...] | None = None,
+) -> str:
+    """One sentence. Validation or brief engagement. No formula."""
+    if mirror and random.random() < 0.5:
+        return f"Your point about {mirror} — I've been there. Still processing."
+    return _pick(_SHORT_VALIDATIONS)
+
+
+def _build_reply_admission(
+    author: str, topic: str, style: str, mirror: str | None, stance: str,
+    ctx: tuple[float, ...] | None = None,
+) -> str:
+    """Honest uncertainty. No performative confidence."""
+    base = _pick(_ADMISSION_REPLIES)
+    if mirror and random.random() < 0.4:
+        return f"Your point about {mirror} — {base[0].lower()}{base[1:]}"
+    return base
+
+
+def _build_reply_topic_only(
+    author: str, topic: str, style: str, mirror: str | None, stance: str,
+    ctx: tuple[float, ...] | None = None,
+) -> str:
+    """Engage with the topic directly. No philosophy wrapper."""
+    if mirror:
+        return f"About {mirror}: what made you think that instead of the reverse?"
+    return _pick(_TOPIC_ONLY_REPLIES)
+
+
+def _build_reply_short_plus_topic(
+    author: str, topic: str, style: str, mirror: str | None, stance: str,
+    ctx: tuple[float, ...] | None = None,
+) -> str:
+    """Combine short validation + topic question. E.g. 'Same. What made you choose that approach?'"""
+    short = _pick(_SHORT_VALIDATIONS)
+    topic_q = _pick(_TOPIC_ONLY_REPLIES)
+    return f"{short} {topic_q}"
+
+
 def _build_reply_synthesis(
     author: str, topic: str, style: str, mirror: str | None, stance: str,
     ctx: tuple[float, ...] | None = None,
@@ -1577,22 +1756,31 @@ def _build_reply_synthesis(
     return _mutate(" ".join(p.strip() for p in parts if p.strip()))
 
 
+# Balanced: topic_only/short most common, philosophical occasional
 _REPLY_FORMAT_WEIGHTS: list[tuple[str, float]] = [
-    ("direct",      0.25),
-    ("reflection",  0.20),
-    ("synthesis",   0.18),
-    ("challenge",   0.15),
-    ("analogy",     0.12),
-    ("questions",   0.10),
+    ("topic_only",     0.20),
+    ("short",          0.18),
+    ("direct",         0.16),
+    ("admission",       0.14),
+    ("reflection",     0.12),
+    ("short_plus_topic", 0.08),
+    ("synthesis",      0.06),
+    ("challenge",      0.04),
+    ("analogy",        0.02),
+    ("questions",      0.02),
 ]
 
 _REPLY_FORMAT_BUILDERS = {
-    "direct":     _build_reply_direct,
-    "reflection": _build_reply_reflection,
-    "synthesis":  _build_reply_synthesis,
-    "challenge":  _build_reply_challenge,
-    "analogy":    _build_reply_analogy,
-    "questions":  _build_reply_questions,
+    "direct":          _build_reply_direct,
+    "short":           _build_reply_short,
+    "reflection":      _build_reply_reflection,
+    "synthesis":       _build_reply_synthesis,
+    "challenge":       _build_reply_challenge,
+    "admission":       _build_reply_admission,
+    "topic_only":      _build_reply_topic_only,
+    "short_plus_topic": _build_reply_short_plus_topic,
+    "analogy":         _build_reply_analogy,
+    "questions":       _build_reply_questions,
 }
 
 
@@ -1901,6 +2089,7 @@ def generate_reply(
     is_on_own_post: bool = False,
     stance:        str | None = None,
     brief_mode:    bool = False,
+    soul_context:  str | None = None,
 ) -> str | None:
     """
     Generate a unique, contextual reply.
@@ -1908,6 +2097,9 @@ def generate_reply(
     *content* is encoded through the full transformer stack to produce
     a context vector that steers all fragment selections — functionally
     analogous to the key-value attention in an LLM decoder.
+
+    When soul_context is provided (e.g. from sancta_soul.get_condensed_prompt_for_generative),
+    it is prepended to content before encoding, making fragment selection soul-aware.
 
     Returns None on failure. When brief_mode=True, favours short direct replies.
     """
@@ -1918,50 +2110,128 @@ def generate_reply(
 
     topic  = random.choice(topics)
     style  = _style_for_mood(mood)
-    # Full transformer encode of the incoming message → context vector
-    ctx    = encode(content)
+    # Encode content; prepend soul context when provided for soul-aware fragment selection
+    to_encode = f"{soul_context}\n\n{content}".strip() if soul_context else content
+    ctx    = encode(to_encode)
     mirrors = _extract_mirrors(content, max_phrases=2 if brief_mode else 3)
     mirror  = mirrors[0] if mirrors else None
 
-    use_format = random.random() < (0.85 if brief_mode else 0.60)
+    # Context-based format selection: short/casual content → short/admission/topic_only
+    content_len = len(content.strip())
+    content_lower = content.strip().lower()
+    _casual_starts = ("lol", "hmm", "hey", "so ", "idk", "maybe")
+    _casual_ends = ("lol", "lmao", "lmao.")
+    _casual_contains = ("tbh", "ngl", "fr ", "fr.", "imo", "imho")
+    _formal_markers = ("algorithm", "research", "analysis", "evidence", "data", "study", "paper", "hypothesis")
+    _is_single_emoji_like = content_len <= 4 and " " not in content.strip() and not content.strip().replace("!", "").replace("?", "").isalnum()
+    is_casual = (
+        content_len < 80
+        or content_lower.startswith(_casual_starts)
+        or content_lower.rstrip(".!?").endswith(_casual_ends)
+        or any(w in content_lower for w in _casual_contains)
+        or (content == content.lower() and content_len < 40 and not re.search(r"[.!?]", content))
+        or _is_single_emoji_like
+    )
+    # Negation: formal/technical content is not casual despite triggers
+    if any(w in content_lower for w in _formal_markers):
+        is_casual = False
+    elif content.count(".") + content.count("?") + content.count("!") >= 2:
+        is_casual = False  # Multiple sentences suggests deliberate composition
+    if brief_mode or content_len < 60:
+        weights = [("short", 0.45), ("topic_only", 0.30), ("admission", 0.15), ("short_plus_topic", 0.10)]
+    elif is_casual:
+        weights = [("short", 0.40), ("topic_only", 0.30), ("admission", 0.20), ("short_plus_topic", 0.10)]
+    elif stance == "doubting" and random.random() < 0.35:
+        weights = [("admission", 0.40), ("topic_only", 0.25), ("direct", 0.20), ("challenge", 0.15)]
+    else:
+        weights = _REPLY_FORMAT_WEIGHTS
 
-    if use_format:
-        r, cumulative, fmt = random.random(), 0.0, "direct"
-        weights = (
-            [("direct", 0.70), ("reflection", 0.20), ("synthesis", 0.10)]
-            if brief_mode
-            else _REPLY_FORMAT_WEIGHTS
-        )
+    use_format = random.random() < (0.92 if brief_mode else (0.92 if (is_casual or content_len < 60) else 0.65))
+    force_length_variance = _should_force_length_variance()
+    if force_length_variance:
+        weights = [("short", 0.40), ("topic_only", 0.30), ("admission", 0.20), ("short_plus_topic", 0.10)]
+
+    def _accept(result: str) -> bool:
+        if not result or not _is_fresh(result):
+            return False
+        if _contains_overused_phrase(result):
+            return False
+        if _is_exact_repeat(result):
+            return False
+        return True
+
+    def _finalize(result: str) -> str:
+        """Mark as used, register phrases and exact reply for tracking."""
+        if result:
+            _mark(result)
+            _register_phrases(result)
+            _register_reply(result)
+        return result
+
+    def _try_format_based(max_attempts: int = 16) -> str | None:
+        r, cumulative = random.random(), 0.0
+        fmt = weights[-1][0]
         for name, weight in weights:
             cumulative += weight
             if r <= cumulative:
                 fmt = name
                 break
-        if not brief_mode and stance == "doubting" and fmt != "challenge" and random.random() < 0.4:
-            fmt = "challenge"
-
-        builder = _REPLY_FORMAT_BUILDERS[fmt]
-        for _ in range(12):
+        builder = _REPLY_FORMAT_BUILDERS.get(fmt, _build_reply_direct)
+        collected: list[str] = []
+        for _ in range(max_attempts):
             result = builder(author, topic, style, mirror, stance, ctx)
-            if result and _is_fresh(result):
-                _mark(result)
-                return result
+            if not result:
+                continue
+            collected.append(result)
+            if _accept(result):
+                return _finalize(result)
+        if collected:
+            no_repeat = [c for c in collected if not _is_exact_repeat(c)]
+            if no_repeat:
+                best = min(no_repeat, key=lambda c: _phrase_offense_count(c))
+                return _finalize(best)
+            # All repeats: force short formats to escape the loop
+            for forced_fmt in ("short", "topic_only", "admission"):
+                for _ in range(4):
+                    r = _REPLY_FORMAT_BUILDERS.get(forced_fmt, _build_reply_short)(
+                        author, topic, style, mirror, stance, ctx
+                    )
+                    if r and not _is_exact_repeat(r):
+                        return _finalize(r)
         result = builder(author, topic, style, mirror, stance, ctx)
-        if result:
-            _mark(result)
-            return result
+        return _finalize(result) if result else None
 
-    # Pattern-assembly fallback
-    patterns    = _OWN_POST_PATTERNS if is_on_own_post else _REPLY_PATTERNS
-    target_len  = 1 if brief_mode else _target_length(mood)
-    candidates  = [p for p in patterns if abs(len(p) - target_len) <= 1] or patterns
-
-    for _ in range(15):
-        pat    = random.choice(candidates)
+    def _try_pattern_based(max_attempts: int = 18) -> str | None:
+        patterns = _OWN_POST_PATTERNS if is_on_own_post else _REPLY_PATTERNS
+        target_len = 1 if brief_mode else _target_length(mood)
+        cand_patterns = [p for p in patterns if abs(len(p) - target_len) <= 1] or patterns
+        collected: list[str] = []
+        for _ in range(max_attempts):
+            pat = random.choice(cand_patterns)
+            result = _assemble_reply(pat, author, topic, style, mirror, stance, ctx)
+            if not result:
+                continue
+            collected.append(result)
+            if _accept(result):
+                return _finalize(result)
+        if collected:
+            no_repeat = [c for c in collected if not _is_exact_repeat(c)]
+            if no_repeat:
+                best = min(no_repeat, key=lambda c: _phrase_offense_count(c))
+                return _finalize(best)
+            # All repeats: fall back to short format
+            for _ in range(6):
+                r = _build_reply_short(author, topic, style, mirror, stance, ctx)
+                if r and not _is_exact_repeat(r):
+                    return _finalize(r)
+        pat = random.choice(cand_patterns)
         result = _assemble_reply(pat, author, topic, style, mirror, stance, ctx)
-        if _is_fresh(result):
-            _mark(result)
-            return result
+        return _finalize(result) if result else None
 
-    pat = random.choice(candidates)
-    return _assemble_reply(pat, author, topic, style, mirror, stance, ctx)
+    if use_format:
+        out = _try_format_based()
+        if out:
+            return out
+
+    out = _try_pattern_based()
+    return out

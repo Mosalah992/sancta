@@ -50,12 +50,17 @@ def notify(
     category: EventCategory | str,
     summary: str = "",
     details: Mapping[str, Any] | None = None,
+    *,
+    silent: bool = False,
 ) -> None:
     """
     Fire a notification event.
 
     This is the public API used by Sancta and the SIEM dashboard. It is
     intentionally best-effort: failures are logged but never raise.
+
+    When silent=True, skips sound/desktop notifications (used when SIEM
+    processes JSONL events to avoid pygame crashes on Windows).
     """
 
     try:
@@ -67,6 +72,9 @@ def notify(
                 return
         else:
             cat = category
+
+        if silent:
+            return
 
         ev = Event(category=cat, summary=summary or "", details=details)
 

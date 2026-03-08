@@ -39,6 +39,11 @@ replays/
 .cache/
 *.tmp
 
+# Vector DB and model checkpoints (regenerated locally)
+data/
+checkpoints/
+.agent.pid
+
 # Compiled extensions
 *.pyd
 
@@ -68,3 +73,6 @@ htmlcov/
 *.backup
 *.old
 *~
+
+# Agent memory / operational notes (may contain usernames, interaction details)
+MEMORY.md
