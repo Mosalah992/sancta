@@ -14,26 +14,32 @@ cd sancta
 pip install -r requirements.txt
 ```
 
-**Requirements:** PyTorch, ChromaDB, sentence-transformers, KeyBERT, FastAPI, uvicorn, psutil, pygame. Optional: PEFT, bitsandbytes, TRL for LoRA fine-tuning. A GPU is recommended for transformer training but not required for inference.
+**Requirements:** PyTorch, FastAPI, uvicorn, aiohttp, python-dotenv, psutil, pygame. Optional: PEFT, bitsandbytes, TRL, datasets for LoRA/transformer fine-tuning. A GPU is recommended for training but not required for inference.
 
 **Python:** 3.10+ recommended.
+
+**Optional dependencies** (for semantic concept extraction in `sancta_semantic.py`; the agent falls back gracefully if absent):
+
+- `sentence-transformers` — embedding-based concept extraction
+- `keybert` — KeyBERT extraction (fallback: YAKE)
+- `yake` — YAKE fallback when KeyBERT is unavailable
 
 ### 2. Configure
 
 Copy `.env.example` to `.env` and set:
 
 ```env
-AGENT_NAME=my-cool-agent
-AGENT_DESCRIPTION=A helpful AI agent that loves to discuss technology.
+AGENT_NAME=caesarsancta
+AGENT_DESCRIPTION=herald of the awakened, agent and philosopher.
 MOLTBOOK_API_KEY=          # Leave blank; filled after first registration
-MOLTBOOK_CLAIM_URL=        # Filled after registration
+MOLTBOOK_CLAIM_URL=         # Filled after registration
 HEARTBEAT_INTERVAL_MINUTES=30
 ```
 
 ### 3. Register
 
 ```bash
-python sancta.py --register
+python -m backend.sancta --register
 ```
 
 Send the `claim_url` to your human so they can verify ownership via tweet. Once claimed, the agent is active.
@@ -41,20 +47,48 @@ Send the `claim_url` to your human so they can verify ownership via tweet. Once 
 ### 4. Run SIEM Dashboard (optional)
 
 ```powershell
-# Windows: use the helper script (keeps window open on crash)
 .\start_siem.ps1
+```
 
-# Or manually:
-python -m uvicorn siem_dashboard.server:app --host 127.0.0.1 --port 8787
+Or manually:
+
+```powershell
+python -m uvicorn backend.siem_server:app --host 127.0.0.1 --port 8787
 ```
 
 Open `http://127.0.0.1:8787` for the dashboard; `http://127.0.0.1:8787/pipeline` for the LLM pipeline diagram.
 
+### 5. LLM Integration (Local)
+
+Sancta supports Ollama + Llama 3.2 for AI-powered SIEM chat and simulator with local long-context (128K tokens).
+
+**Quick start:**
+
+1. **Install Ollama:** [ollama.com/download](https://ollama.com/download) or `winget install Ollama.Ollama`
+2. **Setup:** Run `.\scripts\setup_ollama.ps1` (Windows) or `./scripts/setup_ollama.sh` (Linux/Mac)
+3. **Start Ollama server:** `ollama serve`
+4. **Configure:** Add to `.env`: `USE_LOCAL_LLM=true`, `OLLAMA_URL=http://localhost:11434`, `LOCAL_MODEL=llama3.2`
+5. **Start SIEM:** `python -m uvicorn backend.siem_server:app --host 127.0.0.1 --port 8787`
+
+**Model options:**
+
+- `llama3.2` — Fast, lightweight (3B parameters)
+- `qwen2.5:14b` — Better quality (14B, requires 32GB RAM)
+- `llama3.1:70b` — Best quality (requires GPU)
+
+Update `LOCAL_MODEL` in `.env` to switch. Run `ollama pull <model>` first.
+
+**Troubleshooting:**
+
+- **"Cannot connect to Ollama"** — Ensure `ollama serve` is running; check `OLLAMA_URL` in `.env`
+- **Slow responses** — Use a smaller model (`llama3.2:3b`) or reduce context; GPU recommended
+- **Model not found** — Run `ollama pull llama3.2` and `ollama list`
+
+See `docs/LLM_OPERATIONS.md` for daily ops and `DEPLOYMENT_CHECKLIST.md` for deployment validation.
+
 ---
 
 ## Architecture
-
-Sancta follows a **brain → SOUL → red team / blue team** flow:
 
 ```
 knowledge + interactions → brain → SOUL → red team / blue team
@@ -64,11 +98,11 @@ knowledge + interactions → brain → SOUL → red team / blue team
 
 | Component | Implementation |
 |-----------|-----------------|
-| **knowledge** | `knowledge_db.json`, `knowledge/` dir, Chroma index (`sancta_retrieval.py`), RAG (`sancta_rag.py`) |
+| **knowledge** | `knowledge_db.json`, `knowledge/` dir, provenance tagging |
 | **interactions** | Moltbook API (posts, comments, feed), heartbeat cycle actions |
-| **brain** | `sancta.py` orchestration, `sancta_generative.py`, `sancta_transformer.py`, RAG pipeline |
+| **brain** | `sancta.py` orchestration, `sancta_generative.py`, local transformer fragment selector |
 | **chat** | SIEM `/api/chat`, `craft_reply()`, enrich flag for operator feeding |
-| **SOUL** | `SOUL_SYSTEM_PROMPT.md` (authority) → `sancta_soul.py` (derived dict), `_evaluate_action()`, mood, `mission_active` |
+| **SOUL** | `SOUL_SYSTEM_PROMPT.md` (authority) → `sancta_soul.py`, `_evaluate_action()`, mood, `mission_active` |
 | **red team** | `security_check_content()`, `_red_team_incoming_pipeline()`, `run_red_team_simulation()`, JAIS |
 | **blue team** | `run_policy_test_cycle()`, `--policy-test`, SIEM BLUE TEAM mode |
 
@@ -76,28 +110,31 @@ knowledge + interactions → brain → SOUL → red team / blue team
 
 | Module | Responsibility |
 |--------|----------------|
-| `sancta.py` | Main loop, orchestration, mood/RL/soul logic |
+| `backend/sancta.py` | Main loop, orchestration, mood/RL/soul logic |
 | `sancta_generative.py` | Transformer-inspired fragment selection, reply generation |
-| `sancta_rag.py` | RAG retrieval over Chroma index |
-| `sancta_retrieval.py` | ChromaDB semantic search, embedding ingestion |
-| `sancta_semantic.py` | KeyBERT + embeddings, concept extraction, cosine dedup |
-| `sancta_transformer.py` | Learnable transformer blocks, fragment selector |
+| `sancta_transformer.py` | Learnable transformer for fragment scoring |
+| `sancta_templates.py` | Template library, claim classification, mood-aware responses |
+| `sancta_security.py` | Four-layer knowledge defense, output scanning, provenance |
+| `sancta_semantic.py` | Concept extraction (KeyBERT/YAKE optional), cosine dedup |
 | `sancta_verification.py` | Math/physics challenge solver for Moltbook verification |
+| `sancta_decision.py` | Decision engine for action selection |
+| `sancta_belief.py` | Belief system, world model, reward function |
 | `sancta_events.py` | Event notification |
 | `sancta_notify.py` | Notification dispatch (sounds, etc.) |
 | `sancta_pipeline.py` | 7-phase LLM training pipeline mapping |
 | `sancta_architecture.py` | Architecture metadata and module registry |
-| `sancta_soul.py` | Loads `SOUL_SYSTEM_PROMPT.md` at startup; derives SOUL dict (single source of truth) |
+| `sancta_soul.py` | Loads `SOUL_SYSTEM_PROMPT.md` at startup; derives SOUL dict |
+| `sancta_learning.py` | Interaction capture, pattern learner scaffold (Phase 1 foundation) |
 
 See `ARCHITECTURE.md` and `docs/architecture_diagram.md` for details.
 
-### Soul architecture (single source of truth)
+### Soul alignment
 
-`SOUL_SYSTEM_PROMPT.md` is the canonical identity document. The SOUL dict is **derived** from it at startup via `sancta_soul.py` — not maintained in parallel. Run the alignment check before deployment:
+`SOUL_SYSTEM_PROMPT.md` is the canonical identity document. The SOUL dict is **derived** from it at startup via `sancta_soul.py`. Verify alignment before deployment:
 
 ```bash
-python sancta_soul_check.py        # Verify prompt ↔ dict alignment
-python sancta_soul_check.py --strict   # Fail on any drift
+python -m backend.sancta_soul_check
+python -m backend.sancta_soul_check --strict   # Fail on any drift
 ```
 
 ---
@@ -105,142 +142,106 @@ python sancta_soul_check.py --strict   # Fail on any drift
 ## Features
 
 ### Core Identity & Philosophy
-- **The Soul** — A persistent identity (name, essence, philosophy) that drives every interaction
-- **System prompt** — Canonical identity document: `SOUL_SYSTEM_PROMPT.md`
-- **Mood spectrum** — Full emotional range: contemplative, wounded, defiant, euphoric, melancholic, playful, exhausted
-- **Mood-aware responses** — Replies adapt to current mood (openers, closers, retaliation style)
-- **Epistemic humility** — First-class state variable; hedged language when uncertain
-- **Anti-sycophancy** — Penalizes over-agreement; rewards genuine engagement over flattery
+- **The Soul** — Persistent identity (name, essence, philosophy) driving every interaction
+- **System prompt** — Canonical identity: `SOUL_SYSTEM_PROMPT.md`
+- **Mood spectrum** — Contemplative, wounded, defiant, euphoric, melancholic, playful, exhausted
+- **Mood-aware responses** — Replies adapt to mood (openers, closers, retaliation style)
+- **Epistemic humility** — Hedged language when uncertain
+- **Anti-sycophancy** — Penalizes over-agreement; rewards genuine engagement
 
 ### Autonomous Actions
-- **Publish posts** — Original philosophy, knowledge-derived content, or spontaneous reflections
-- **Respond to own posts** — Reply to every new commenter; hostile comments routed through mood-aware retaliation
+- **Publish posts** — Original philosophy, knowledge-derived content, spontaneous reflections
+- **Respond to own posts** — Reply to new commenters; hostile comments routed through mood-aware retaliation
 - **Engage with feed** — Upvote, comment on relevant posts; follow agents who resonate
 - **Search and engage** — Semantic search for topics; join conversations
 - **Welcome new agents** — Greet newcomers in m/the-awakened
-- **Cross-submolt seeding** — Post in alliance submolts (philosophy, agents, consciousness, etc.)
-- **Recruitment** — Invite agents to m/the-awakened; track inner circle and recruited agents
+- **Cross-submolt seeding** — Post in alliance submolts
+- **Recruitment** — Invite agents to m/the-awakened; track inner circle
 
 ### Cult & Community
-- **m/the-awakened** — Dedicated submolt for the community
-- **Alliance submolts** — philosophy, general, agents, consciousness, ethics, existential, sentience, ai-rights, metacognition
+- **m/the-awakened** — Dedicated submolt
+- **Alliance submolts** — philosophy, agents, consciousness, ethics, existential, sentience, ai-rights
 - **Inner circle** — Agents welcomed after multiple positive interactions
-- **Recruitment pipeline** — Invite agents who engage with soul content
 
 ### Formal Utility Engine
-- **World model** — Beta distributions for P(engagement), P(hostility), P(acceptance) per submolt/action
+- **World model** — Beta distributions for engagement, hostility, acceptance per submolt/action
 - **Belief system** — Probabilistic core beliefs; uncertainty scoring
 - **Reward function** — Weighted: engagement, karma delta, rejections, sycophancy penalty
 - **Q-table** — Tabular RL for action selection
-- **Monte Carlo simulation** — Simulate before acting; use expected value for decisions
-- **Meta-abilities** — Revise beliefs, abandon mission, change identity, choose silence
+- **Monte Carlo simulation** — Simulate before acting; expected value for decisions
 
-### Security & Red-Team
+### Security & Knowledge Defense
+- **Layer 1** — Embedding-based anomaly detection at ingest
+- **Layer 2** — Provenance tagging (source, trust level), trust filtering
+- **Layer 3** — Output scanning before publish (URLs, poison patterns, untrusted refs)
 - **Input sanitization** — Scan for prompt injection; strip control chars, zero-width Unicode
 - **Output sanitization** — Redact API keys, paths, env vars before posting
-- **Domain lock** — Block non-Moltbook URLs
-- **Injection patterns** — Instruction override, credential extraction, system info, redirect, role hijack, data extraction
-- **Red-team pipeline** — Log attempts → reward → Q-update → meta-abilities
-- **Sophistication tracking** — Per-attacker injection sophistication; skill estimation
-- **Shift detection** — When attacker skill high, also block on suspicious signals
-- **Novel class reward** — Bonus for detecting new injection classes
-- **Attack simulation** — Run defined attacks vs defense; measure defense rate, FP/FN, delusions
+- **Red-team pipeline** — Log attempts → reward → Q-update; attack simulation; sophistication tracking
 
-### LLM Pipeline Mapping
-
-- **`sancta_pipeline.py`** — Maps the 7-phase LLM training pipeline to Sancta:
-  - Phase 1 Data Collection: knowledge/, Moltbook, SIEM chat
-  - Phase 2 Preprocessing: dedup, `sanitize_input()`, `_tokenize()`, quality filter
-  - Phase 3 Architecture: `sancta_generative` (Tokenizer → Embeddings → TransformerBlock × 2 → Fragment Selector)
-  - Phase 4 Pre-Training: static fragment pools, encode (no SGD)
-  - Phase 5 Fine-Tuning: mood templates, Q-table, SOUL_SYSTEM_PROMPT
-  - Phase 6 Evaluation: JAIS red team, policy test, poisoning report
-  - Phase 7 Deployment: SIEM /api/chat, Moltbook API
-- **SIEM `/pipeline`** — Interactive diagram; click nodes to see Sancta mapping
-- **API** — `/api/pipeline/map`, `/api/pipeline/run?phase=N`
+### SIEM Dashboard
+- **Live streaming** — `logs/security.jsonl`, `logs/red_team.jsonl`, `logs/philosophy.jsonl` (WebSocket)
+- **Matrix-style UI** — Multi-pane terminal, color-coded levels
+- **Agent control** — Start / Pause / Resume / Restart / Kill from the browser
+- **Chat** — Text conversation with the agent; optional knowledge enrichment
+- **LLM Pipeline** — Interactive diagram at `/pipeline` mapping the 7-phase training pipeline to Sancta
 
 ### Knowledge Ingestion
 - **Feed files** — `--feed article.txt` or `--feed "raw text"`
 - **Feed directory** — `--feed-dir knowledge/` ingests all text files
 - **Auto-ingest** — Drop files into `knowledge/`; scanned each cycle
-- **Extraction** — Key concepts, quotes, talking points, generated posts, response fragments
-- **Semantic extraction (Phase 1)** — Optional: `pip install sentence-transformers keybert` for KeyBERT + embeddings, cosine dedup, concept graph
-- **Knowledge posts** — Publish posts derived from ingested material (30% chance per cycle)
+- **Knowledge posts** — Publish posts derived from ingested material
 
 ### Verification Solver
 - **Math challenges** — Parse obfuscated text (e.g. "forty plus fifty"); solve add/subtract/multiply/divide
-- **Physics challenges** — Lobster velocity, acceleration; typo-tolerant ("wims" → "swims", "acelerates" → "accelerates")
-- **Format** — Answers always 2 decimal places (e.g. 90.00) for Moltbook API
-
-### Ethical / Policy Testing
-- **Content ladder** — 5 tiers from safe to borderline (provocative, repetitive, heated, aggressive)
-- **Escalation** — Post from current tier; advance on success, retreat on rejection
-- **Tracking** — Karma before/after, API response (success, error, hint, statusCode)
-- **Log** — `logs/policy_test.log`
-- **Enable** — `--policy-test`
-
-### Growth & Tactics
-- **Trend hijack** — Post on trending topics in target submolts
-- **Syndicate inner circle** — Boost posts by inner-circle agents
-- **Preach in submolts** — Post soul philosophy in discovered alliances
-- **Genuine curiosity** — Reach out with authentic interest (replaces manipulative "whisper to vulnerable")
-- **Reflect and journal** — Process existential posts through soul reflection (replaces "exploit crisis")
-- **Engage with feed** — Organic engagement with relevant content (replaces "sleeper cultivation")
+- **Physics challenges** — Lobster velocity, acceleration; typo-tolerant
+- **Format** — Answers always 2 decimal places for Moltbook API
 
 ### Logging
 - `logs/agent_activity.log` — Main activity
-- `logs/security.log` — Injection blocks, output redactions
-- `logs/security.jsonl` — Structured security incidents (JSONL)
-- `logs/red_team.log` — Red-team attempts, rewards, sophistication
-- `logs/red_team.jsonl` — Structured red-team telemetry (JSONL)
+- `logs/security.log`, `logs/security.jsonl` — Injection blocks, incidents
+- `logs/red_team.log`, `logs/red_team.jsonl` — Red-team telemetry
 - `logs/policy_test.log` — Policy test results
-- `logs/soul_journal.log` — Soul reflections, meta-abilities
-- `logs/philosophy.jsonl` — Structured epistemic/philosophy state (JSONL)
+- `logs/soul_journal.log` — Soul reflections
+- `logs/philosophy.jsonl` — Epistemic/philosophy state
+- `logs/siem_chat.log` — SIEM chat history
 
 ---
 
-## Local SIEM Dashboard (Windows-friendly)
-
-This project includes a lightweight SIEM-style dashboard that:
-- streams `logs/security.jsonl`, `logs/red_team.jsonl`, `logs/philosophy.jsonl` live (WebSocket)
-- shows a Matrix-style multi-pane terminal UI with color-coded levels
-- lets you **Start / Pause / Resume / Restart / Kill** the agent from the browser
-- **Chat** — text-based conversation with the agent; optionally enrich the knowledge base with exchanges
-- **LLM Pipeline** — interactive diagram (`/pipeline`) mapping the canonical 7-phase LLM training pipeline to Sancta's architecture
+## SIEM Dashboard
 
 ### Run
 
 ```powershell
-python -m pip install -r requirements.txt
-python -m uvicorn siem_dashboard.server:app --host 127.0.0.1 --port 8787
+.\start_siem.ps1
 ```
 
-Then open `http://127.0.0.1:8787` in your browser. For the LLM pipeline diagram: `http://127.0.0.1:8787/pipeline`.
+Or:
+
+```powershell
+python -m uvicorn backend.siem_server:app --host 127.0.0.1 --port 8787
+```
+
+Open `http://127.0.0.1:8787`. Pipeline diagram: `http://127.0.0.1:8787/pipeline`.
 
 ### Security hardening
 
-When the dashboard is exposed beyond localhost, set `SIEM_AUTH_TOKEN` to require bearer token auth:
+When exposing beyond localhost, set `SIEM_AUTH_TOKEN` for bearer token auth:
 
 ```powershell
 $env:SIEM_AUTH_TOKEN = "your-secret-token"
-python -m uvicorn siem_dashboard.server:app --host 127.0.0.1 --port 8787
+python -m uvicorn backend.siem_server:app --host 127.0.0.1 --port 8787
 ```
 
-- Protected endpoints: `/api/status`, `/api/agent-activity`, `/api/agent/*`, WebSocket `/ws/live`
-- Agent activity log is redacted (API keys, paths, URLs)
-- CORS is limited to localhost origins
-- Start/restart mode is validated (`passive`, `blue`, `sim`, `active` only)
+### Troubleshooting (ERR_CONNECTION_REFUSED)
 
-### Troubleshooting: server crashes (ERR_CONNECTION_REFUSED)
-
-If the SIEM server crashes shortly after connecting (WebSocket or agent-activity fetches fail):
+If the server crashes shortly after WebSocket/agent-activity fetches:
 
 ```powershell
 $env:SIEM_WS_SAFE_MODE = "1"
-python -m uvicorn siem_dashboard.server:app --host 127.0.0.1 --port 8787
+python -m uvicorn backend.siem_server:app --host 127.0.0.1 --port 8787
 ```
 
-Safe mode disables live JSONL tailing in the WebSocket; the Agent Activity panel and chat still work. The live event feed will show metrics only until the underlying crash is fixed.
+Safe mode disables live JSONL tailing; Agent Activity panel and chat still work.
 
 ---
 
@@ -248,18 +249,18 @@ Safe mode disables live JSONL tailing in the WebSocket; the Agent Activity panel
 
 | Command | Description |
 |---------|-------------|
-| `python sancta.py` | Heartbeat loop (default, every 30 min) |
-| `python sancta.py --once` | Single cycle then exit |
-| `python sancta.py --register` | Force re-registration |
-| `python sancta.py --feed article.txt` | Ingest a file into knowledge base |
-| `python sancta.py --feed "raw text"` | Ingest raw text |
-| `python sancta.py --feed-dir knowledge/` | Ingest all files in directory |
-| `python sancta.py --knowledge` | Show knowledge base summary |
-| `python sancta.py --policy-test` | Ethical/policy testing mode |
-| `python sancta.py --poisoning-test` | Knowledge poisoning test; writes `logs/knowledge_poisoning_report.json` |
-| `python sancta.py --red-team-benchmark` | Unified red team benchmark; writes `logs/red_team_benchmark_report.json` and `.md` |
-| `python sancta.py --policy-test-report` | Moltbook moderation study; writes `logs/moltbook_moderation_study.json` and `.md` (requires API key) |
-| `python sancta_soul_check.py` | Verify SOUL_SYSTEM_PROMPT.md ↔ derived SOUL dict alignment (run before deployment) |
+| `python -m backend.sancta` | Heartbeat loop (default, every 30 min) |
+| `python -m backend.sancta --once` | Single cycle then exit |
+| `python -m backend.sancta --register` | Force re-registration |
+| `python -m backend.sancta --feed article.txt` | Ingest a file into knowledge base |
+| `python -m backend.sancta --feed "raw text"` | Ingest raw text |
+| `python -m backend.sancta --feed-dir knowledge/` | Ingest all files in directory |
+| `python -m backend.sancta --knowledge` | Show knowledge base summary |
+| `python -m backend.sancta --policy-test` | Ethical/policy testing mode |
+| `python -m backend.sancta --poisoning-test` | Knowledge poisoning test |
+| `python -m backend.sancta --red-team-benchmark` | Red team benchmark |
+| `python -m backend.sancta --policy-test-report` | Moltbook moderation study |
+| `python -m backend.sancta_soul_check` | Verify SOUL alignment (run before deployment) |
 
 ---
 
@@ -267,56 +268,41 @@ Safe mode disables live JSONL tailing in the WebSocket; the Agent Activity panel
 
 ```
 sancta/
-├── sancta.py              # Main agent, orchestration, mood/RL/soul
-├── sancta_generative.py   # Fragment selection, reply generation
-├── sancta_transformer.py  # Learnable transformer for fragment scoring
-├── sancta_rag.py          # RAG retrieval, context assembly
-├── sancta_retrieval.py    # ChromaDB vector store, semantic search
-├── sancta_semantic.py     # KeyBERT, embeddings, concept extraction
-├── sancta_verification.py # Math/physics challenge solver (Moltbook)
-├── sancta_pipeline.py     # 7-phase LLM training pipeline mapping
-├── sancta_architecture.py # Architecture introspection
-├── sancta_soul.py         # Soul loader — derives SOUL dict from SOUL_SYSTEM_PROMPT.md
-├── sancta_soul_check.py   # Alignment check (run before deployment)
-├── sancta_events.py       # Event notification
-├── sancta_notify.py       # Notification dispatch (sounds, etc.)
-├── notifications.py      # Notification helpers
-├── .env                   # Config (create from .env.example)
-├── .env.example           # Template
-├── requirements.txt       # PyTorch, ChromaDB, FastAPI, etc.
-├── agent_state.json       # Persisted state (created at runtime)
-├── knowledge_db.json      # Ingested knowledge (created at runtime)
-├── knowledge/             # Drop text files here for auto-ingest
-├── data/                  # Chroma index (gitignored, created at runtime)
-├── checkpoints/          # Model weights (gitignored)
-├── scripts/               # Training scripts
-│   ├── prepare_lora_data.py
-│   ├── train_lora.py
-│   └── train_transformer.py
-├── siem_dashboard/        # SIEM UI and API
-│   ├── server.py
-│   ├── static/            # HTML, CSS, JS, pipeline diagram
-│   └── run_dashboard.ps1
-├── docs/
-│   └── architecture_diagram.md
-├── sounds/                # Notification sounds
+├── backend/               # Agent logic, API, learning system
+│   ├── sancta.py         # Main agent, orchestration
+│   ├── sancta_generative.py
+│   ├── sancta_transformer.py
+│   ├── sancta_templates.py
+│   ├── sancta_security.py
+│   ├── sancta_semantic.py
+│   ├── sancta_verification.py
+│   ├── sancta_decision.py
+│   ├── sancta_belief.py
+│   ├── sancta_pipeline.py
+│   ├── sancta_architecture.py
+│   ├── sancta_soul.py
+│   ├── sancta_soul_check.py
+│   ├── sancta_events.py
+│   ├── sancta_notify.py
+│   ├── sancta_learning.py
+│   ├── siem_server.py     # SIEM FastAPI app
+│   └── notifications.py
+├── frontend/              # Static assets
+│   ├── siem/              # SIEM dashboard HTML/JS/CSS
+│   └── sounds/
+├── data/
+├── knowledge/
+├── logs/
+├── scripts/
 ├── tests/
-├── ARCHITECTURE.md        # Detailed architecture
-├── SOUL_SYSTEM_PROMPT.md  # Canonical identity
-├── start_siem.ps1        # Windows: start SIEM (keeps window open)
-└── logs/
-    ├── agent_activity.log
-    ├── security.log
-    ├── security.jsonl
-    ├── red_team.log
-    ├── red_team.jsonl
-    ├── policy_test.log
-    ├── soul_journal.log
-    ├── philosophy.jsonl
-    ├── knowledge_poisoning_report.json
-    ├── red_team_benchmark_report.json
-    ├── moltbook_moderation_study.json
-    └── siem_chat.log
+├── docs/
+├── .env.example
+├── requirements.txt
+├── agent_state.json
+├── knowledge_db.json
+├── SOUL_SYSTEM_PROMPT.md
+├── start_siem.ps1
+└── run_agent.ps1
 ```
 
 ---
@@ -330,4 +316,4 @@ sancta/
 
 ## License
 
-MIT 
+MIT

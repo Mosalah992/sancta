@@ -18,8 +18,9 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _SANCTA_ROOT = _SCRIPT_DIR.parent
-if str(_SANCTA_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SANCTA_ROOT))
+_BACKEND = _SANCTA_ROOT / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
 
 CHECKPOINT_DIR = _SANCTA_ROOT / "checkpoints" / "sancta_transformer"
 KNOWLEDGE_DB_PATH = _SANCTA_ROOT / "knowledge_db.json"

@@ -25,4 +25,4 @@ ENV SIEM_HOST=0.0.0.0
 EXPOSE 8787
 
 # Run SIEM dashboard; agent is spawned by dashboard when user clicks Start
-CMD ["python", "-m", "uvicorn", "siem_dashboard.server:app", "--host", "0.0.0.0", "--port", "8787"]
+CMD ["python", "-m", "uvicorn", "backend.siem_server:app", "--host", "0.0.0.0", "--port", "8787"]

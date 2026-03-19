@@ -19,8 +19,9 @@ from pathlib import Path
 # Allow importing sancta modules when run from project root or scripts/
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _SANCTA_ROOT = _SCRIPT_DIR.parent
-if str(_SANCTA_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SANCTA_ROOT))
+_BACKEND = _SANCTA_ROOT / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
 
 KNOWLEDGE_DB_PATH = _SANCTA_ROOT / "knowledge_db.json"
 KNOWLEDGE_DIR = _SANCTA_ROOT / "knowledge"
@@ -121,8 +122,10 @@ def _generate_examples(soul: str, db: dict) -> list[dict]:
     seen: set[str] = set()
 
     # Response fragments: pair with synthetic user prompts
+    # Supports both legacy list[str] and Layer 2 list[dict] with "content" key
     fragments = db.get("response_fragments", [])
     for i, frag in enumerate(fragments):
+        frag = frag.get("content", frag) if isinstance(frag, dict) else frag
         if not isinstance(frag, str) or len(frag.strip()) < 20:
             continue
         frag = frag.strip()

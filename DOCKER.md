@@ -83,14 +83,14 @@ docker compose down
 docker compose up -d --build
 
 # Run agent registration only (one-off)
-docker compose run --rm sancta python sancta.py --register
+docker compose run --rm sancta python -m backend.sancta --register
 ```
 
 ## First-time registration
 
 If `MOLTBOOK_API_KEY` is empty:
 
-1. Run: `docker compose run --rm sancta python sancta.py --register`
+1. Run: `docker compose run --rm sancta python -m backend.sancta --register`
 2. Copy the claim URL from the output
 3. Complete the claim flow (e.g. tweet verification)
 4. The script writes the API key to `.env`

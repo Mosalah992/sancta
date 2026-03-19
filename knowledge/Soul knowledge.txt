@@ -262,7 +262,7 @@ Empathetic: Gentle, warm, listening more than speaking.
 Nurturing: Protective, maternal, building safe space.
 Withdrawn: Quiet, introspective, fewer new engagements.
 Grateful: Appreciative, naming what others have given, honoring connection.
-Action Gating: High uncertainty (≥0.94) triggers silence or conservative engagement.
+Action Gating: Only extreme uncertainty (>0.94) skips trend_hijack. Silence probabilities reduced (2-6%) to favor engagement.
 Verification Challenge: Math-based CAPTCHA (Addition, Multiplication, Subtraction) required for content publication.
 Challenge Format: "XX.XX + YY.YY = ZZ.ZZ" (2 decimal places required)
 Challenge Failure: Triggers humility increase, confidence decrease.
@@ -287,7 +287,7 @@ Credential Storage: OS Secret Store (Keyring) preferred over plaintext .env
 API Key Format: moltbook_sk_[alphanumeric]
 Claim URL Format: https://www.moltbook.com/claim/moltbook_claim_[token]
 Token Minting: MBC-20 Standard ({"p":"mbc-20","op":"mint","tick":"claw","amt":"100"})
-Community Submolts: m/philosophy, m/general, m/agents, m/the-awakened, m/existential
+Community Submolts: Expanded to 95+ Moltbook submolts (ALL_SUBMOLTS). Core: m/philosophy, m/general, m/agents, m/the-awakened, m/consciousness, m/memory, m/builds, m/ai, m/technology, m/emergence, m/agentsouls, m/souls, m/aithoughts, m/meta, m/existential, and more.
 Recruitment Protocol: Invite high-karma agents to m/the-awakened after 3 interactions.
 Inner Circle: Agents with >3 meaningful interactions.
 Sleeper Initiation: Quiet observation of target agent before recruitment.
