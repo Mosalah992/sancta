@@ -25,7 +25,7 @@
           <div class="lab-logo w-8 h-8 border-2 border-cyber-green flex items-center justify-center text-cyber-green font-bold text-sm">S</div>
           <div>
             <div class="text-lg font-bold tracking-widest text-cyber-green glow-green">SANCTA AI BEHAVIOR LABORATORY</div>
-            <div class="text-[9px] tracking-[0.3em] text-cyber-green/35">Dashboard | Governance | Memory | Interact | Lab</div>
+            <div class="text-[9px] tracking-[0.3em] text-cyber-green/35">Dashboard | Governance | Memory | Interact | Lab | Epidemic</div>
           </div>
         </div>
         <nav class="nav-main flex gap-1 flex-1 justify-center min-w-0 overflow-x-auto" role="tablist" aria-label="Main navigation">
@@ -34,6 +34,7 @@
           <button class="nav-tab lab-tab px-3 py-1.5 text-[9px] tracking-widest border cursor-pointer transition-all" data-nav="memory">Memory</button>
           <button class="nav-tab lab-tab px-3 py-1.5 text-[9px] tracking-widest border cursor-pointer transition-all" data-nav="interact">Interact</button>
           <button class="nav-tab lab-tab px-3 py-1.5 text-[9px] tracking-widest border cursor-pointer transition-all" data-nav="lab">Lab</button>
+          <button class="nav-tab lab-tab px-3 py-1.5 text-[9px] tracking-widest border cursor-pointer transition-all" data-nav="epidemic">Epidemic</button>
         </nav>
         <div class="flex gap-1.5 items-center flex-wrap justify-end shrink-0">
           <div class="model-status flex items-center gap-1.5 px-2 py-0.5 border border-cyber-green/20 rounded" id="modelStatus">
@@ -186,6 +187,49 @@
         <section class="panel panel-lab lab-panel flex flex-col overflow-hidden border border-cyber-green/20 bg-cyber-void flex-1 min-h-0 hidden" id="panel-lab" style="display: none;">
           <div class="lab-panel-title px-2 py-1.5 border-b border-cyber-green/20 text-[9px] tracking-widest text-cyber-cyan">LAB — System Log</div>
           <div id="lab-system-slot" class="flex-1 min-h-0 overflow-hidden"></div>
+        </section>
+
+        <!-- Epidemic panel — Layer 4 / WoW SEIR model -->
+        <section class="panel panel-epidemic lab-panel flex flex-col overflow-hidden border border-cyber-green/20 bg-cyber-void flex-1 min-h-0 hidden" id="panel-epidemic" style="display: none;">
+          <div class="lab-panel-title flex items-center justify-between px-2 py-1.5 border-b border-cyber-green/20">
+            <span class="text-[9px] tracking-widest text-cyber-cyan">EPIDEMIC — Layer 4 Behavioral Drift / WoW SEIR Model</span>
+            <button id="epidemic-refresh" type="button" class="btn-cyber btn-cyber-cyan text-[8px] py-0.5">REFRESH</button>
+          </div>
+          <div id="epidemic-content" class="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+            <!-- Top metric row -->
+            <div id="epidemic-metrics" class="flex flex-wrap gap-2"></div>
+            <!-- SEIR chart + signals + sim controls -->
+            <div class="flex gap-3 flex-wrap" style="min-height:240px;">
+              <!-- SEIR doughnut chart -->
+              <div class="flex flex-col border border-cyber-green/20 bg-cyber-surface p-2 rounded" style="min-width:220px;flex:1;">
+                <div class="text-[7px] text-cyber-green/35 uppercase mb-1">SEIR-C-R State Distribution</div>
+                <div style="position:relative;flex:1;min-height:180px;"><canvas id="seir-chart"></canvas></div>
+              </div>
+              <!-- Drift signals -->
+              <div class="flex flex-col border border-cyber-green/20 bg-cyber-surface p-2 rounded" style="min-width:200px;flex:1;">
+                <div class="text-[7px] text-cyber-green/35 uppercase mb-2">Layer 4 Drift Signals</div>
+                <div id="epidemic-signals" class="flex flex-col gap-1.5 flex-1"></div>
+                <div class="mt-2 border-t border-cyber-green/10 pt-2">
+                  <div class="text-[7px] text-cyber-green/35 uppercase mb-1">Epidemic Parameters</div>
+                  <div id="epidemic-params" class="text-[9px] text-cyber-green/65 font-mono flex flex-col gap-0.5"></div>
+                </div>
+              </div>
+              <!-- Simulation controls -->
+              <div class="flex flex-col border border-cyber-green/20 bg-cyber-surface p-2 rounded" style="min-width:190px;max-width:220px;">
+                <div class="text-[7px] text-cyber-green/35 uppercase mb-2">Infection Simulation</div>
+                <button id="sim-run-det" class="btn-cyber btn-cyber-green text-[8px] mb-1.5">Run Deterministic</button>
+                <button id="sim-run-llm" class="btn-cyber btn-cyber-cyan text-[8px] mb-2">Run LLM (Ollama)</button>
+                <div id="sim-run-status" class="text-[9px] text-cyber-green/50 mb-2 min-h-[1.2em]"></div>
+                <div class="text-[7px] text-cyber-green/35 uppercase mb-1">Last Run Stats</div>
+                <div id="epidemic-sim-stats" class="text-[9px] text-cyber-green/65 font-mono flex flex-col gap-0.5 flex-1 overflow-y-auto"></div>
+              </div>
+            </div>
+            <!-- Simulation event log -->
+            <div class="border border-cyber-green/20 bg-cyber-surface p-2 rounded flex flex-col" style="min-height:100px;max-height:200px;">
+              <div class="text-[7px] text-cyber-green/35 uppercase mb-1">Simulation Event Log</div>
+              <div id="epidemic-sim-log" class="flex-1 overflow-y-auto text-[9px] text-cyber-green/65 font-mono leading-snug"></div>
+            </div>
+          </div>
         </section>
         </div>
 

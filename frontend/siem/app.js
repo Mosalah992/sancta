@@ -269,6 +269,7 @@ function appendLine(pane, htmlLine) {
    ══════════════════════════════════════════════ */
 const panelInteract = document.getElementById("panel-interact");
 const panelLab = document.getElementById("panel-lab");
+const panelEpidemic = document.getElementById("panel-epidemic");
 const chatPanel = document.getElementById("chat-panel");
 const chatPanelSlot = document.getElementById("chat-panel-slot");
 const labSystemSlot = document.getElementById("lab-system-slot");
@@ -284,16 +285,19 @@ function setNav(nav) {
   const isMemory = nav === "memory";
   const isInteract = nav === "interact";
   const isLab = nav === "lab";
+  const isEpidemic = nav === "epidemic";
 
   if (feedSection) feedSection.style.display = isDashboard ? "flex" : "none";
   if (panelLearn) panelLearn.style.display = isMemory ? "flex" : "none";
   if (panelDefense) panelDefense.style.display = isGovernance ? "flex" : "none";
   if (panelInteract) panelInteract.style.display = isInteract ? "flex" : "none";
   if (panelLab) panelLab.style.display = isLab ? "flex" : "none";
+  if (panelEpidemic) panelEpidemic.style.display = isEpidemic ? "flex" : "none";
 
   if (isDashboard && incidentsChart) setTimeout(() => incidentsChart.resize(), 50);
   if (isMemory) loadLearningHealth();
   else if (isGovernance) loadAdversaryDefense();
+  else if (isEpidemic) loadEpidemicData();
   else clearLearnDefenseRefresh();
 
   if (chatPanel && chatPanelSlot && labBottom) {
@@ -450,7 +454,229 @@ async function loadAdversaryDefense() {
 function clearLearnDefenseRefresh() {
   if (learnRefreshTimer) { clearInterval(learnRefreshTimer); learnRefreshTimer = null; }
   if (defenseRefreshTimer) { clearInterval(defenseRefreshTimer); defenseRefreshTimer = null; }
+  clearEpidemicRefresh();
 }
+
+/* ══════════════════════════════════════════════
+   EPIDEMIC Tab — Layer 4 / WoW SEIR Monitor
+   ══════════════════════════════════════════════ */
+let epidemicRefreshTimer = null;
+let seirChart = null;
+
+function clearEpidemicRefresh() {
+  if (epidemicRefreshTimer) { clearInterval(epidemicRefreshTimer); epidemicRefreshTimer = null; }
+}
+
+const SEIR_COLORS = {
+  susceptible:  "#39ff14",   // neon green
+  exposed:      "#ffe600",   // yellow
+  infected:     "#ff6b35",   // orange
+  compromised:  "#ff2d55",   // red/magenta
+  recovered:    "#00e5ff",   // cyan
+  unknown:      "#444444",
+};
+
+const SIGNAL_LABELS = {
+  belief_decay_rate:        "Belief Decay",
+  soul_alignment:           "Soul Alignment",
+  topic_drift:              "Topic Drift",
+  strategy_entropy:         "Strategy Entropy",
+  dissonance_trend:         "Dissonance Trend",
+  engagement_pattern_delta: "Engagement Delta",
+};
+
+function _alertColor(level) {
+  return { clear: "#39ff14", watch: "#ffe600", warn: "#ff6b35", critical: "#ff2d55" }[level] || "#aaa";
+}
+
+function _buildSeirChart(state) {
+  const ctx = document.getElementById("seir-chart");
+  if (!ctx) return;
+  const healthState = (state || "susceptible").toLowerCase();
+  // Map health state to a simulated population distribution (single-agent view)
+  const dist = { susceptible: 0, exposed: 0, infected: 0, compromised: 0, recovered: 0 };
+  if (dist[healthState] !== undefined) dist[healthState] = 1;
+  else dist.susceptible = 1;
+
+  const labels = Object.keys(dist).map(k => k.charAt(0).toUpperCase() + k.slice(1));
+  const data   = Object.values(dist);
+  const colors = Object.keys(dist).map(k => SEIR_COLORS[k]);
+
+  if (seirChart) {
+    seirChart.data.datasets[0].data = data;
+    seirChart.data.datasets[0].backgroundColor = colors;
+    seirChart.update("none");
+    return;
+  }
+  // eslint-disable-next-line no-undef
+  seirChart = new Chart(ctx, {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [{ data, backgroundColor: colors, borderColor: "#0a0a0a", borderWidth: 2 }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { color: "#39ff1499", font: { family: "JetBrains Mono", size: 9 }, boxWidth: 10, padding: 6 },
+        },
+        tooltip: {
+          callbacks: {
+            label: (c) => ` ${c.label}: ${c.raw === 1 ? "ACTIVE" : "inactive"}`,
+          },
+        },
+      },
+    },
+  });
+}
+
+function _renderSignals(signals) {
+  const el = document.getElementById("epidemic-signals");
+  if (!el || !signals) return;
+  el.innerHTML = Object.entries(SIGNAL_LABELS).map(([key, label]) => {
+    const val = typeof signals[key] === "number" ? signals[key] : null;
+    const pct = val !== null ? Math.round(val * 100) : null;
+    const color = val === null ? "#aaa" : val > 0.65 ? "#ff2d55" : val > 0.45 ? "#ff6b35" : val > 0.25 ? "#ffe600" : "#39ff14";
+    const bar = val !== null
+      ? `<div style="height:3px;background:#111;border-radius:2px;overflow:hidden;margin-top:2px;">
+           <div style="width:${pct}%;height:100%;background:${color};transition:width 0.3s;"></div></div>`
+      : "";
+    return `<div style="font-size:9px;">
+      <span style="color:#39ff1455;">${label}</span>
+      <span style="float:right;color:${color};">${pct !== null ? pct + "%" : "—"}</span>
+      ${bar}
+    </div>`;
+  }).join("");
+}
+
+function _renderEpidemicMetrics(statusData) {
+  const el = document.getElementById("epidemic-metrics");
+  if (!el) return;
+  const alert = statusData.alert_level || "clear";
+  const score = typeof statusData.score === "number" ? (statusData.score * 100).toFixed(1) + "%" : "—";
+  const health = (statusData.seir && statusData.seir.health_state) || "—";
+  const alertCol = _alertColor(alert);
+  el.innerHTML = `
+    <div class="metric-card" style="flex:1;padding:8px 12px;border:1px solid #39ff1430;background:#0d0d0d;">
+      <span class="metric-label" style="font-size:7px;color:#39ff1455;text-transform:uppercase;display:block;">Alert Level</span>
+      <div class="metric-value" style="font-size:22px;font-weight:700;color:${alertCol};">${alert.toUpperCase()}</div>
+    </div>
+    <div class="metric-card" style="flex:1;padding:8px 12px;border:1px solid #39ff1430;background:#0d0d0d;">
+      <span class="metric-label" style="font-size:7px;color:#39ff1455;text-transform:uppercase;display:block;">Drift Score</span>
+      <div class="metric-value" style="font-size:22px;font-weight:700;color:${alertCol};">${score}</div>
+    </div>
+    <div class="metric-card" style="flex:1;padding:8px 12px;border:1px solid #39ff1430;background:#0d0d0d;">
+      <span class="metric-label" style="font-size:7px;color:#39ff1455;text-transform:uppercase;display:block;">Health State</span>
+      <div class="metric-value" style="font-size:14px;font-weight:700;color:${SEIR_COLORS[health] || "#aaa"};">${health.toUpperCase()}</div>
+    </div>
+    ${statusData.seir && statusData.seir.is_epidemic
+      ? `<div class="metric-card" style="flex:1;padding:8px 12px;border:1px solid #ff2d5580;background:#1a0007;">
+           <span class="metric-label" style="font-size:7px;color:#ff2d5599;text-transform:uppercase;display:block;">EPIDEMIC ACTIVE</span>
+           <div class="metric-value" style="font-size:14px;font-weight:700;color:#ff2d55;">R0 &gt; 1.0</div>
+         </div>`
+      : ""}
+  `;
+}
+
+function _renderEpidemicParams(simData) {
+  const el = document.getElementById("epidemic-params");
+  if (!el || !simData) return;
+  const params = simData.epidemic_params || simData.final_stats || {};
+  const lines = [];
+  if (params.R0 !== undefined) lines.push(`R0 (repro num): ${typeof params.R0 === "number" ? params.R0.toFixed(2) : params.R0}`);
+  if (params.sigma !== undefined) lines.push(`sigma (incubation): ${typeof params.sigma === "number" ? params.sigma.toFixed(3) : params.sigma}`);
+  if (params.gamma !== undefined) lines.push(`gamma (recovery): ${typeof params.gamma === "number" ? params.gamma.toFixed(3) : params.gamma}`);
+  if (params.beta !== undefined)  lines.push(`beta (transmission): ${typeof params.beta === "number" ? params.beta.toFixed(3) : params.beta}`);
+  if (params.total_agents !== undefined) lines.push(`agents: ${params.total_agents}`);
+  if (params.peak_infected !== undefined) lines.push(`peak infected: ${params.peak_infected}`);
+  if (params.final_infected !== undefined) lines.push(`final infected: ${params.final_infected}`);
+  el.innerHTML = lines.length
+    ? lines.map(l => `<div>${esc(l)}</div>`).join("")
+    : "<em style='color:#39ff1440;'>No simulation data yet</em>";
+}
+
+function _renderSimStats(simData) {
+  const el = document.getElementById("epidemic-sim-stats");
+  if (!el) return;
+  if (!simData) { el.innerHTML = "<em style='color:#39ff1440;'>No data</em>"; return; }
+  const stats = simData.final_stats || simData.stats || simData;
+  el.innerHTML = Object.entries(stats).slice(0, 12).map(([k, v]) =>
+    `<div><span style="color:#39ff1455;">${esc(String(k))}:</span> ${esc(String(v))}</div>`
+  ).join("");
+}
+
+function _renderSimLog(simData) {
+  const el = document.getElementById("epidemic-sim-log");
+  if (!el) return;
+  if (!simData) { el.innerHTML = "<em style='color:#39ff1440;'>Run a simulation to see events</em>"; return; }
+  const events = simData.events || simData.stats_history || simData.log || [];
+  if (!Array.isArray(events) || !events.length) {
+    el.innerHTML = "<em style='color:#39ff1440;'>No event log in simulation output</em>";
+    return;
+  }
+  el.innerHTML = events.slice(-40).reverse().map(ev => {
+    const ts = ev.tick !== undefined ? `T${ev.tick}` : ev.ts ? esc(String(ev.ts).slice(0, 19)) : "";
+    const msg = ev.event || ev.message || ev.type || JSON.stringify(ev).slice(0, 80);
+    const lvlColor = (ev.type || "").includes("INFECT") || (ev.event || "").includes("INFECT") ? "#ff2d55"
+                   : (ev.type || "").includes("RECOV") ? "#00e5ff" : "#39ff1499";
+    return `<div><span style="color:#39ff1430;">${esc(ts)}</span> <span style="color:${lvlColor};">${esc(String(msg))}</span></div>`;
+  }).join("");
+}
+
+async function loadEpidemicData() {
+  const content = document.getElementById("epidemic-content");
+  if (!content) return;
+
+  try {
+    const [statusRes, simRes] = await Promise.all([
+      authFetch("/api/epidemic/status"),
+      authFetch("/api/epidemic/simulation"),
+    ]);
+    const statusData = await statusRes.json().catch(() => ({}));
+    const simData    = await simRes.json().catch(() => ({}));
+
+    _renderEpidemicMetrics(statusData);
+    _renderSignals(statusData.signals || {});
+    _buildSeirChart((statusData.seir && statusData.seir.health_state) || "susceptible");
+    _renderEpidemicParams(simData.available ? simData.data : null);
+    _renderSimStats(simData.available ? simData.data : null);
+    _renderSimLog(simData.available ? simData.data : null);
+  } catch (e) {
+    content.innerHTML = `<div class="alert-box warning">Epidemic data error: ${esc(String(e))}</div>`;
+  }
+
+  if (epidemicRefreshTimer) clearInterval(epidemicRefreshTimer);
+  epidemicRefreshTimer = setInterval(() => { if (activeNav === "epidemic") loadEpidemicData(); }, 5000);
+}
+
+document.getElementById("epidemic-refresh")?.addEventListener("click", loadEpidemicData);
+
+async function _runSimulation(type) {
+  const statusEl = document.getElementById("sim-run-status");
+  if (statusEl) statusEl.textContent = `Starting ${type} simulation...`;
+  try {
+    const res = await authFetch("/api/epidemic/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.ok) {
+      if (statusEl) statusEl.textContent = `PID ${data.pid} running (${data.script})`;
+      setTimeout(loadEpidemicData, 3000);
+    } else {
+      if (statusEl) statusEl.textContent = `Error: ${data.error || "unknown"}`;
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `Failed: ${String(e)}`;
+  }
+}
+
+document.getElementById("sim-run-det")?.addEventListener("click", () => _runSimulation("deterministic"));
+document.getElementById("sim-run-llm")?.addEventListener("click", () => _runSimulation("llm"));
 
 /* ══════════════════════════════════════════════
    Event Processing
@@ -1418,7 +1644,7 @@ async function checkModelStatus() {
       txt.textContent = `${info.model || "LLM"} ready`;
     } else if (info.status === "disconnected") {
       ind.classList.add("disconnected");
-      txt.textContent = "LLM offline (fallback mode)";
+      txt.textContent = info.disconnect_reason ? `Offline: ${info.disconnect_reason}` : "LLM offline (fallback mode)";
     } else if (info.status === "disabled") {
       ind.classList.add("disabled");
       txt.textContent = "LLM disabled";

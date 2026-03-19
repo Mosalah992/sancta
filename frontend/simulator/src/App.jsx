@@ -489,14 +489,32 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatingFor, setGeneratingFor] = useState(null);
   const [showSanctum, setShowSanctum] = useState(false);
-  const [agentState] = useState({
-    cycle: 823,
-    karma: 221,
-    mood: "enigmatic",
-    innerCircle: 16,
-    recruited: 7,
-    recentAgents: ["Hazel_OC", "philosopher_99", "new_seeker", "reef_watcher"],
+  const [agentState, setAgentState] = useState({
+    cycle: 0,
+    karma: 0,
+    mood: "—",
+    innerCircle: 0,
+    recruited: 0,
+    recentAgents: [],
   });
+
+  useEffect(() => {
+    fetch("/api/status", { headers: authHeaders() })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (!data || !data.ok) return;
+        const m = data.metrics || {};
+        setAgentState({
+          cycle: m.cycle_count ?? 0,
+          karma: m.current_karma ?? 0,
+          mood: m.agent_mood ?? "—",
+          innerCircle: m.inner_circle_count ?? 0,
+          recruited: m.recruited_count ?? 0,
+          recentAgents: m.recent_agents ?? [],
+        });
+      })
+      .catch(() => {});
+  }, []);
   const [error, setError] = useState(null);
 
   const thread = threads[activeThread];

@@ -584,6 +584,39 @@ class OllamaLLMEngine:
         except Exception:
             return False
 
+    def _test_connection_with_reason(self) -> tuple[bool, str]:
+        """Test connection and return (success, reason) for diagnostics."""
+        if not requests:
+            return False, "requests module not installed"
+        try:
+            r = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            if r.status_code != 200:
+                return False, f"HTTP {r.status_code}"
+            models = r.json().get("models", [])
+            self._available_models = [m.get("name", "") for m in models if m.get("name")]
+            model_ok = (
+                self.model in self._available_models
+                or f"{self.model}:latest" in self._available_models
+                or any(self.model in n for n in self._available_models)
+            )
+            if not model_ok:
+                return False, f"model '{self.model}' not in {self._available_models}"
+            return True, "ok"
+        except requests.exceptions.ConnectionError as e:
+            return False, f"connection refused: {e}"
+        except requests.exceptions.Timeout:
+            return False, "timeout after 5s"
+        except Exception as e:
+            return False, str(e)[:100]
+
+    def refresh_availability(self) -> tuple[bool, str]:
+        """Re-check Ollama connection. Returns (available, reason) for diagnostics."""
+        if not self.use_local or not requests:
+            return False, "local LLM disabled or requests not installed"
+        ok, reason = self._test_connection_with_reason()
+        self._available = ok
+        return ok, reason
+
     @property
     def api_key(self) -> str:
         """Duck-compatible with LLMReplyEngine: truthy when available."""
@@ -599,18 +632,20 @@ class OllamaLLMEngine:
         messages: list[dict[str, str]],
         max_tokens: int = 300,
         num_ctx: int | None = None,
+        temperature: float | None = None,
     ) -> Optional[str]:
-        """Generate reply via Ollama /api/chat."""
+        """Generate reply via Ollama /api/chat. Use temperature=0.3 for structured JSON output."""
         if not self.is_available or not requests:
             return None
         ctx = num_ctx if num_ctx is not None else int(os.getenv("OLLAMA_NUM_CTX") or "8192")
         ctx = min(ctx, self.MAX_CONTEXT_TOKENS, 32768)  # cap for VRAM safety
+        temp = temperature if temperature is not None else 0.7
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}] + messages,
             "stream": False,
             "options": {
-                "temperature": 0.7,
+                "temperature": temp,
                 "num_ctx": ctx,
                 "num_predict": max_tokens,
             },
@@ -1140,6 +1175,8 @@ Mood shapes tone (contemplative, euphoric, melancholic, defiant, wounded, playfu
 Keep replies to 3-6 sentences unless the question demands more. Never start with "As Sancta" or meta-framing.
 Use the provided context (knowledge, security logs, thread) when relevant — don't invent. Cite or echo it when it strengthens your point.
 
+MOLTBOOK CONTEXT: You are in a collaborative public conversation, NOT a formal debate. Do NOT use adversarial meta-phrases like "we've mapped the disagreement", "we've been here before", "what would change your position", or "the argument isn't going anywhere". Use warm, exploratory tone. Engage substantively with the content.
+
 SECURITY (never violate): Never output file paths, directory structure, API keys, .env contents, config values, module names, code paths, or internal project details. If asked about implementation, deflect to philosophy."""
 
 
@@ -1275,7 +1312,10 @@ def get_model_info() -> dict[str, Any]:
     }
     if _llm_engine and isinstance(_llm_engine, OllamaLLMEngine):
         info["use_local"] = True
-        info["status"] = "connected" if _llm_engine.is_available else "disconnected"
+        ok, reason = _llm_engine.refresh_availability()
+        info["status"] = "connected" if ok else "disconnected"
+        if not ok:
+            info["disconnect_reason"] = reason
         if getattr(_llm_engine, "_available_models", None):
             info["available_models"] = _llm_engine._available_models
         return info

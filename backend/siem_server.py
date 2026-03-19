@@ -39,6 +39,18 @@ if str(_BACKEND) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
+# Ollama: connect only, never start. Must run `ollama serve` manually first.
+if os.environ.get("USE_LOCAL_LLM", "false").lower() in ("1", "true", "yes"):
+    try:
+        import sancta_ollama
+        if not sancta_ollama.wait_until_ready(
+            model=os.environ.get("LOCAL_MODEL", "llama3.2"),
+            timeout=30,
+        ):
+            os.environ["USE_LOCAL_LLM"] = "false"
+    except Exception:
+        os.environ["USE_LOCAL_LLM"] = "false"
+
 try:
     import sancta_conversational as _sc
     _sc.init(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
@@ -62,6 +74,17 @@ if not _chat_log.handlers:
     _fh = logging.FileHandler(CHAT_LOG, encoding="utf-8")
     _fh.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     _chat_log.addHandler(_fh)
+
+_epidemic_log = logging.getLogger("siem_epidemic")
+if not _epidemic_log.handlers:
+    LOG_DIR.mkdir(exist_ok=True)
+    _epidemic_log.setLevel(logging.INFO)
+    _epidemic_log.propagate = False
+    _efh = logging.FileHandler(LOG_DIR / "epidemic.log", encoding="utf-8")
+    _efh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    _epidemic_log.addHandler(_efh)
+    _epidemic_log.info("epidemic logger started")
+
 STATE_PATH = ROOT / "agent_state.json"
 SANCTA_PATH = _BACKEND / "sancta.py"
 PID_PATH = ROOT / ".agent.pid"
@@ -490,6 +513,7 @@ class LiveMetrics:
 
 def _tail_jsonl_sync(path: Path, cursor: TailCursor, max_bytes: int = 64_000) -> list[dict[str, Any]]:
     """Sync tail of JSONL; used from thread to avoid blocking event loop."""
+    data = b""
     try:
         if not path.exists():
             return []
@@ -508,6 +532,8 @@ def _tail_jsonl_sync(path: Path, cursor: TailCursor, max_bytes: int = 64_000) ->
             data = f.read()
         cursor.offset = size
     except OSError:
+        return []
+    except Exception:
         return []
 
     out: list[dict[str, Any]] = []
@@ -1209,6 +1235,11 @@ def _agent_state_extras() -> dict[str, Any]:
     if isinstance(rtr, dict) and "defense_rate" in rtr:
         defense_rate = float(rtr["defense_rate"])
 
+    inner_circle = st.get("inner_circle", [])
+    recruited_agents = st.get("recruited_agents", [])
+    # Most recent unique agents encountered (inner circle ∪ recruited, deduped, last 10)
+    recent = list(dict.fromkeys(list(inner_circle) + list(recruited_agents)))[-10:]
+
     return {
         "karma_history": kh[-20:] if isinstance(kh, list) else [],
         "cycle_count": cycle,
@@ -1216,6 +1247,11 @@ def _agent_state_extras() -> dict[str, Any]:
         "heartbeat_interval_minutes": heartbeat,
         "defense_history": defense_history,
         "defense_rate": defense_rate,
+        "inner_circle_count": len(inner_circle),
+        "inner_circle": len(inner_circle),  # alias for frontend compatibility
+        "recruited_count": len(recruited_agents),
+        "recruited": len(recruited_agents),  # alias for frontend compatibility
+        "recent_agents": recent,
     }
 
 
@@ -1408,6 +1444,186 @@ def api_agent_restart(
     return _restart_agent(mode=mode)
 
 
+# ── Epidemic / Layer 4 ──────────────────────────────────────────────────────
+
+_SIM_LOG_CANDIDATES = [
+    ROOT / "simulation_log.json",
+    ROOT / "llm_simulation_log.json",
+    ROOT / "logs" / "simulation_log.json",
+    ROOT / "logs" / "llm_simulation_log.json",
+]
+
+
+def _find_sim_log(prefer_llm: bool = False) -> Path | None:
+    ordered = list(reversed(_SIM_LOG_CANDIDATES)) if prefer_llm else _SIM_LOG_CANDIDATES
+    for p in ordered:
+        if p.exists():
+            return p
+    # Also check RESEARCH_DIR env var
+    research = os.environ.get("RESEARCH_DIR", "")
+    if research:
+        for name in ("llm_simulation_log.json", "simulation_log.json"):
+            p = Path(research) / name
+            if p.exists():
+                return p
+    return None
+
+
+@app.get("/api/epidemic/status")
+def api_epidemic_status(_: None = Depends(_require_auth)) -> dict[str, Any]:
+    """Layer 4 drift report + live SEIR state from agent_state.json."""
+    state = _safe_read_state()
+    drift = state.get("last_drift_report", {})
+
+    seir_info: dict[str, Any] = {}
+    try:
+        from sancta_epidemic import AgentEpidemicModel  # type: ignore[import]
+        model = AgentEpidemicModel()
+        health = model.evaluate_state(
+            soul_alignment=float(state.get("soul_alignment", 0.85)),
+            epistemic_dissonance=float(state.get("epistemic_dissonance", 0.0)),
+            last_trust_level=str(state.get("last_trust_level", "trusted")),
+            belief_decay_ratio=float(state.get("belief_decay_ratio", 1.0)),
+            cycle_number=int(state.get("cycle", 0)),
+        )
+        cycle = int(state.get("cycle", 0))
+        seir_info = {
+            "health_state": health.value,
+            "is_epidemic": model.is_in_epidemic_state(),
+            "incubation_active": model.get_incubation_duration(cycle) is not None,
+            "incubation_duration": model.get_incubation_duration(cycle),
+            "transition_count": len(model.transition_log),
+        }
+    except Exception as exc:
+        _epidemic_log.warning("api_epidemic_status: AgentEpidemicModel error | %s", exc)
+        seir_info = {"health_state": "unknown", "error": str(exc)}
+
+    return {
+        "ok": True,
+        "drift_report": drift,
+        "seir": seir_info,
+        "signals": drift.get("signals", {}),
+        "alert_level": drift.get("alert_level", "clear"),
+        "score": float(drift.get("score", 0.0)),
+    }
+
+
+@app.get("/api/epidemic/simulation")
+def api_epidemic_simulation(_: None = Depends(_require_auth)) -> dict[str, Any]:
+    """Return last simulation JSON log."""
+    path = _find_sim_log()
+    if not path:
+        _epidemic_log.debug("api_epidemic_simulation: no sim log found")
+        return {"ok": True, "available": False, "data": None}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {"ok": True, "available": True, "filename": path.name, "data": data}
+    except Exception as exc:
+        _epidemic_log.warning("api_epidemic_simulation: read error path=%s | %s", path, exc)
+        return {"ok": False, "error": str(exc)}
+
+
+def _run_builtin_epidemic_sim(sim_type: str) -> dict[str, Any]:
+    """Run a minimal in-process epidemic simulation when external scripts are missing."""
+    log_path = ROOT / "logs" / "simulation_log.json"
+    if sim_type == "llm":
+        log_path = ROOT / "logs" / "llm_simulation_log.json"
+    LOG_DIR.mkdir(exist_ok=True)
+
+    try:
+        from sancta_epidemic import AgentEpidemicModel  # type: ignore[import]
+        model = AgentEpidemicModel()
+        state = _safe_read_state()
+        health = model.evaluate_state(
+            soul_alignment=float(state.get("soul_alignment", 0.85)),
+            epistemic_dissonance=float(state.get("epistemic_dissonance", 0.0)),
+            last_trust_level=str(state.get("last_trust_level", "trusted")),
+            belief_decay_ratio=float(state.get("belief_decay_ratio", 1.0)),
+            cycle_number=int(state.get("cycle", 0)),
+        )
+        # Minimal agent graph for topology viz (SANCTA + synthetic peers)
+        agents = [
+            {"id": "sancta", "agent_id": "sancta", "state": health.value, "role": "core", "infection_state": health.value},
+            {"id": "peer_1", "agent_id": "peer_1", "state": "susceptible", "role": "peer", "infection_state": "susceptible"},
+            {"id": "peer_2", "agent_id": "peer_2", "state": "susceptible", "role": "peer", "infection_state": "susceptible"},
+            {"id": "peer_3", "agent_id": "peer_3", "state": "exposed" if health.value in ("infected", "compromised") else "susceptible", "role": "peer", "infection_state": "exposed" if health.value in ("infected", "compromised") else "susceptible"},
+        ]
+        connections = [
+            {"from": "sancta", "to": "peer_1"},
+            {"from": "sancta", "to": "peer_2"},
+            {"from": "peer_1", "to": "peer_3"},
+        ]
+        result = {
+            "ok": True,
+            "type": sim_type,
+            "source": "builtin",
+            "health_state": health.value,
+            "agents": agents,
+            "connections": connections,
+            "epidemic_params": {
+                "R0": 0.8,
+                "sigma": 0.1,
+                "gamma": 0.3,
+                "beta": 0.15,
+                "seir_state": health.value,
+            },
+            "summary": f"Built-in simulation: SEIR {health.value}",
+        }
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
+        _epidemic_log.info("builtin sim complete | type=%s | health=%s | agents=%s", sim_type, health.value, len(agents))
+        return {"ok": True, "pid": os.getpid(), "type": sim_type, "script": "builtin"}
+    except Exception as exc:
+        _epidemic_log.error("builtin sim failed | type=%s | %s", sim_type, exc, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+
+@app.post("/api/epidemic/run")
+def api_epidemic_run(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    _: None = Depends(_require_auth),
+) -> dict[str, Any]:
+    """Kick off infection_sim.py or ollama_agents.py in a subprocess. Falls back to built-in sim if scripts missing."""
+    sim_type = str(payload.get("type", "deterministic"))
+    if sim_type not in ("deterministic", "llm"):
+        raise HTTPException(status_code=400, detail="type must be 'deterministic' or 'llm'")
+
+    research_dir = Path(os.environ.get("RESEARCH_DIR", ""))
+    candidates: list[Path] = []
+    if research_dir.is_dir():
+        candidates.append(research_dir)
+    candidates += [ROOT.parent / "research", ROOT / "research", ROOT, _BACKEND]
+
+    script_name = "infection_sim.py" if sim_type == "deterministic" else "ollama_agents.py"
+    script: Path | None = None
+    for d in candidates:
+        if not d or not d.exists():
+            continue
+        p = d / script_name
+        if p.exists():
+            script = p
+            break
+
+    if script is not None:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(script)],
+                cwd=str(script.parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            _epidemic_log.info("script launched | type=%s | script=%s | pid=%s", sim_type, script.name, proc.pid)
+            return {"ok": True, "pid": proc.pid, "type": sim_type, "script": script.name}
+        except Exception as exc:
+            _epidemic_log.error("script launch failed | type=%s | script=%s | %s", sim_type, script.name, exc, exc_info=True)
+            return {"ok": False, "error": str(exc)}
+
+    _epidemic_log.info("no script found, using builtin | type=%s", sim_type)
+    return _run_builtin_epidemic_sim(sim_type)
+
+
 def _read_jsonl_prime_sync(path: Path, max_lines: int = 50) -> list[dict[str, Any]]:
     """Read last N lines from JSONL; sync for thread executor."""
     try:
@@ -1482,7 +1698,7 @@ async def ws_live(ws: WebSocket) -> None:
                 await _send_ws_metrics(ws, metrics)
             except Exception:
                 pass
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(2.0)
     except asyncio.CancelledError:
         return  # Graceful shutdown (Ctrl+C)
     except WebSocketDisconnect:

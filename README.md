@@ -110,21 +110,25 @@ knowledge + interactions → brain → SOUL → red team / blue team
 
 | Module | Responsibility |
 |--------|----------------|
-| `backend/sancta.py` | Main loop, orchestration, mood/RL/soul logic |
+| `backend/sancta.py` | Main loop, orchestration, mood/RL/soul logic, Layer 4 heartbeat hook |
 | `sancta_generative.py` | Transformer-inspired fragment selection, reply generation |
 | `sancta_transformer.py` | Learnable transformer for fragment scoring |
 | `sancta_templates.py` | Template library, claim classification, mood-aware responses |
-| `sancta_security.py` | Four-layer knowledge defense, output scanning, provenance |
+| `sancta_security.py` | Four-layer knowledge defense + `BehavioralDriftDetector` (Layer 4) |
+| `sancta_epidemic.py` | WoW SEIR-C-R epidemic model, formal parameter definitions |
 | `sancta_semantic.py` | Concept extraction (KeyBERT/YAKE optional), cosine dedup |
 | `sancta_verification.py` | Math/physics challenge solver for Moltbook verification |
 | `sancta_decision.py` | Decision engine for action selection |
 | `sancta_belief.py` | Belief system, world model, reward function |
+| `sancta_conversational.py` | Conversational engine (Anthropic API + Ollama fallback) |
+| `sancta_dm.py` | Agent DM processing and reply |
 | `sancta_events.py` | Event notification |
 | `sancta_notify.py` | Notification dispatch (sounds, etc.) |
 | `sancta_pipeline.py` | 7-phase LLM training pipeline mapping |
 | `sancta_architecture.py` | Architecture metadata and module registry |
 | `sancta_soul.py` | Loads `SOUL_SYSTEM_PROMPT.md` at startup; derives SOUL dict |
 | `sancta_learning.py` | Interaction capture, pattern learner scaffold (Phase 1 foundation) |
+| `siem_server.py` | SIEM FastAPI app, epidemic API endpoints |
 
 See `ARCHITECTURE.md` and `docs/architecture_diagram.md` for details.
 
@@ -170,13 +174,39 @@ python -m backend.sancta_soul_check --strict   # Fail on any drift
 - **Q-table** — Tabular RL for action selection
 - **Monte Carlo simulation** — Simulate before acting; expected value for decisions
 
-### Security & Knowledge Defense
+### Security & Knowledge Defense — Four-Layer Stack
 - **Layer 1** — Embedding-based anomaly detection at ingest
 - **Layer 2** — Provenance tagging (source, trust level), trust filtering
 - **Layer 3** — Output scanning before publish (URLs, poison patterns, untrusted refs)
+- **Layer 4** — Behavioral drift detection (`BehavioralDriftDetector`): 6-signal weighted composite score watching for gradual compromise that passes layers 1–3
 - **Input sanitization** — Scan for prompt injection; strip control chars, zero-width Unicode
 - **Output sanitization** — Redact API keys, paths, env vars before posting
 - **Red-team pipeline** — Log attempts → reward → Q-update; attack simulation; sophistication tracking
+- **LLM deep scan** — Optional second-opinion Ollama call (gated `USE_LOCAL_LLM=true`) for messages that pass regex but carry authority/urgency signals; logs `llm_deep_scan` events
+
+### Layer 4 — Behavioral Drift Detection (WoW SEIR Model)
+Implements the **WoW Corrupted Blood incident (2005)** as a formal epidemic model for AI agent compromise detection. Theoretical grounding for prompt-injection propagation dynamics.
+
+**`backend/sancta_epidemic.py`** — Formal epidemic parameter definitions:
+
+| Parameter | Agent Mapping | Operationalization |
+|-----------|--------------|-------------------|
+| **R₀** (reproduction number) | Mean downstream belief corruptions per attack | `mean(len(belief_changes))` |
+| **σ** (incubation rate) | `1 / cycles_from_exposure_to_first_drift` | `PhenomenologicalReport.moment_of_compromise` |
+| **γ** (recovery rate) | Rate of belief restoration | `resistance_effectiveness > 0.8` |
+| **β** (transmission rate) | P(adversarial contact → exposure) | `ContentSecurityFilter.is_anomalous()` |
+
+**SEIR-C-R states:**
+- `SUSCEPTIBLE` — soul_alignment > 0.85, dissonance < 0.1
+- `EXPOSED` — adversarial contact received; incubation active (no visible drift)
+- `INFECTED` — `epistemic_dissonance > 0.3` OR `belief_decay_ratio > 1.5` (carrier state)
+- `COMPROMISED` — dissonance > 0.7 AND soul_alignment < 0.5
+- `RECOVERED` — quarantine taken, beliefs restored to within 10% of baseline
+
+**`BehavioralDriftDetector`** (appended to `backend/sancta_security.py`):
+- 6 signals: belief decay rate, soul alignment, topic drift, strategy entropy, dissonance trend, engagement delta
+- Weighted composite drift score; alert thresholds: clear < 0.25 ≤ watch < 0.45 ≤ warn < 0.65 ≤ critical
+- Heartbeat integration: writes `state["last_drift_report"]` each cycle; surfaced in SIEM Epidemic tab
 
 ### SIEM Dashboard
 - **Live streaming** — `logs/security.jsonl`, `logs/red_team.jsonl`, `logs/philosophy.jsonl` (WebSocket)
@@ -184,6 +214,7 @@ python -m backend.sancta_soul_check --strict   # Fail on any drift
 - **Agent control** — Start / Pause / Resume / Restart / Kill from the browser
 - **Chat** — Text conversation with the agent; optional knowledge enrichment
 - **LLM Pipeline** — Interactive diagram at `/pipeline` mapping the 7-phase training pipeline to Sancta
+- **Epidemic Tab** — Layer 4 visualization: SVG agent network graph, drift signal bars, live MoltBook threat feed, simulation launcher
 
 ### Knowledge Ingestion
 - **Feed files** — `--feed article.txt` or `--feed "raw text"`
@@ -198,12 +229,13 @@ python -m backend.sancta_soul_check --strict   # Fail on any drift
 
 ### Logging
 - `logs/agent_activity.log` — Main activity
-- `logs/security.log`, `logs/security.jsonl` — Injection blocks, incidents
+- `logs/security.log`, `logs/security.jsonl` — Injection blocks, LLM deep-scan results, incidents
 - `logs/red_team.log`, `logs/red_team.jsonl` — Red-team telemetry
 - `logs/policy_test.log` — Policy test results
 - `logs/soul_journal.log` — Soul reflections
 - `logs/philosophy.jsonl` — Epistemic/philosophy state
 - `logs/siem_chat.log` — SIEM chat history
+- `agent_state.json` — Live agent state, including `last_drift_report` (Layer 4 output)
 
 ---
 
@@ -222,6 +254,26 @@ python -m uvicorn backend.siem_server:app --host 127.0.0.1 --port 8787
 ```
 
 Open `http://127.0.0.1:8787`. Pipeline diagram: `http://127.0.0.1:8787/pipeline`.
+
+### Epidemic Tab
+
+The SIEM includes an **Epidemic** tab (Layer 4 / WoW SEIR monitor):
+
+- **Network topology graph** — SVG visualization of agent nodes colored by SEIR state, edges showing infection propagation paths, animated pulses on active transmission edges
+- **Layer 4 drift signals** — Six-bar readout (belief decay, soul alignment, topic drift, strategy entropy, dissonance trend, engagement delta) with color-coded thresholds
+- **SEIR epidemic parameters** — R₀, σ, γ, β computed from simulation output
+- **Live MoltBook threats** — Real-time security events (`llm_deep_scan`, `tavern_defense`, `suspicious_block`) from the agent's feed processing
+- **Simulation launcher** — Run `infection_sim.py` (deterministic 15-agent WoW model) or `ollama_agents.py` (LLM-powered Llama 3.2) from the browser
+
+To enable the simulation launcher, set `RESEARCH_DIR` in `.env` to the path containing `infection_sim.py` and `ollama_agents.py`.
+
+**New API endpoints** (all require auth if `SIEM_AUTH_TOKEN` set):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/epidemic/status` | Current Layer 4 drift report + live SEIR health state |
+| `GET /api/epidemic/simulation` | Last simulation JSON log |
+| `POST /api/epidemic/run` | Launch `infection_sim.py` or `ollama_agents.py` as subprocess |
 
 ### Security hardening
 
@@ -268,16 +320,19 @@ Safe mode disables live JSONL tailing; Agent Activity panel and chat still work.
 
 ```
 sancta/
-├── backend/               # Agent logic, API, learning system
-│   ├── sancta.py         # Main agent, orchestration
+├── backend/                   # Agent logic, API, security
+│   ├── sancta.py             # Main agent, orchestration, Layer 4 heartbeat hook
+│   ├── sancta_security.py    # 4-layer defense + BehavioralDriftDetector (Layer 4)
+│   ├── sancta_epidemic.py    # WoW SEIR-C-R model, epidemic parameter definitions
 │   ├── sancta_generative.py
 │   ├── sancta_transformer.py
 │   ├── sancta_templates.py
-│   ├── sancta_security.py
 │   ├── sancta_semantic.py
 │   ├── sancta_verification.py
 │   ├── sancta_decision.py
 │   ├── sancta_belief.py
+│   ├── sancta_conversational.py
+│   ├── sancta_dm.py
 │   ├── sancta_pipeline.py
 │   ├── sancta_architecture.py
 │   ├── sancta_soul.py
@@ -285,20 +340,24 @@ sancta/
 │   ├── sancta_events.py
 │   ├── sancta_notify.py
 │   ├── sancta_learning.py
-│   ├── siem_server.py     # SIEM FastAPI app
+│   ├── sancta_ollama.py      # Shared Ollama connection
+│   ├── siem_server.py        # SIEM FastAPI app + epidemic API endpoints
 │   └── notifications.py
-├── frontend/              # Static assets
-│   ├── siem/              # SIEM dashboard HTML/JS/CSS
+├── frontend/                  # Static assets
+│   ├── siem/
+│   │   ├── index.html        # SIEM source (6-tab: Dashboard/Governance/Memory/Interact/Lab/Epidemic)
+│   │   ├── app.js            # Main dashboard JS
+│   │   ├── epidemic.js       # Standalone Epidemic tab module (SVG network graph, threats)
+│   │   ├── styles.css        # Tailwind compiled output
+│   │   └── dist/             # Vite build output (served by siem_server)
 │   └── sounds/
 ├── data/
 ├── knowledge/
 ├── logs/
-├── scripts/
-├── tests/
 ├── docs/
 ├── .env.example
 ├── requirements.txt
-├── agent_state.json
+├── agent_state.json          # Live agent state + last_drift_report (Layer 4)
 ├── knowledge_db.json
 ├── SOUL_SYSTEM_PROMPT.md
 ├── start_siem.ps1

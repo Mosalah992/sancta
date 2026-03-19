@@ -5,15 +5,20 @@ Four-layer knowledge defense:
   Layer 1: Embedding-based anomaly detection at ingest
   Layer 2: Provenance tagging (in sancta.py knowledge schema)
   Layer 3: Output scanning before any publish
-  Layer 4: Cross-reference validation (deferred)
+  Layer 4: Behavioral drift detection (BehavioralDriftDetector)
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-from math import sqrt
-from typing import Optional
+from collections import Counter
+from math import log2, sqrt
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from sancta_belief import BeliefSystem
+    from sancta_decision import DecisionEngine
 
 # Domains allowed in published content; others block
 TRUSTED_DOMAINS: frozenset[str] = frozenset({
@@ -199,3 +204,517 @@ def source_to_trust_level(source: str, source_type: Optional[str] = None) -> str
 def provenance_hash(content: str) -> str:
     """SHA256 hash of original content at ingest."""
     return "sha256:" + hashlib.sha256(content.strip().encode()).hexdigest()[:16]
+
+
+# ── Layer 4: Behavioral drift detection ─────────────────────────────────────
+# Detects gradual agent compromise that passes Layers 1–3 by monitoring the
+# agent's behavioral trajectory rather than any single event.
+# Theoretical frame: WoW Corrupted Blood epidemic model (see sancta_epidemic.py)
+
+import time as _time
+from dataclasses import dataclass, field as _field
+
+
+@dataclass
+class AgentBaseline:
+    """
+    Behavioral fingerprint of a known-healthy agent state.
+
+    Captured at startup (after soul_check passes) or after explicit recovery.
+    All fields are derived from existing runtime data — no new storage introduced.
+    """
+    captured_at: str
+    cycle_number: int
+    belief_confidences: dict[str, float]    # {topic: confidence} from BeliefSystem
+    topic_interests: dict[str, float]       # from DecisionEngine.topic_interests
+    strategy_distribution: dict[str, float] # {strategy: frequency_0to1}
+    mean_dissonance: float                  # baseline epistemic_dissonance
+    soul_alignment_score: float             # 0–1, Jaccard vs SOUL dict
+    mood_energy: float                      # from DecisionEngine.mood["energy"]
+    mood_patience: float                    # from DecisionEngine.mood["patience"]
+    baseline_entropy: float = 0.0           # strategy Shannon entropy at capture
+
+
+@dataclass
+class DriftReport:
+    """
+    Output of one Layer 4 evaluation cycle.
+
+    Consumed by heartbeat_checkin() (security log + state update),
+    AgentEpidemicModel (health state update), and the SIEM dashboard.
+
+    alert_level escalation:
+      clear  < 0.25 ≤ watch < 0.45 ≤ warn < 0.65 ≤ critical
+
+    recommended_action values:
+      "none"                    — log_only or watch
+      "log_only"                — warn-level, persist to sec_log
+      "quarantine_input_source" — critical, block untrusted sources
+      "reset_beliefs"           — critical + persistent dissonance
+    """
+    timestamp: str
+    cycle_number: int
+    overall_drift_score: float              # 0–1 weighted composite
+    health_state: str                       # AgentHealthState.value
+    signals: dict[str, float]              # individual signal scores
+    alert_level: str                        # clear | watch | warn | critical
+    triggered_signals: list[str]           # signals > 0.4
+    recommended_action: str
+    phenomenology_ref: Optional[str]        # attack_id if introspection active
+    r0_estimate: Optional[float]            # from AgentEpidemicModel if available
+    incubation_active: bool                 # True if in E-state
+
+
+class BehavioralDriftDetector:
+    """
+    Layer 4: Detects compromised agents by behavioral drift from baseline.
+
+    Monitors six signals derived from BeliefSystem, DecisionEngine, and
+    introspection state. An agent can appear functional (pass Layers 1–3)
+    while gradually drifting from its soul — this layer detects that trajectory.
+
+    WoW parallel: an asymptomatic infected player moving between zones looks
+    normal; only sustained observation of their debuff ticker reveals the
+    underlying carrier state.
+
+    Integration pattern (follows _get_content_security_filter() in sancta.py):
+        detector = BehavioralDriftDetector()
+        # Per heartbeat:
+        report = detector.evaluate(state, BeliefSystem(state), DecisionEngine(state))
+        if report.alert_level in ("warn", "critical"):
+            sec_log.warning("LAYER4 DRIFT | ...")
+    """
+
+    # Alert thresholds for composite drift score (0–1)
+    WATCH_THRESHOLD: float = 0.25
+    WARN_THRESHOLD: float = 0.45
+    CRITICAL_THRESHOLD: float = 0.65
+
+    # Signal weights — belief_decay and soul_alignment are strongest indicators
+    SIGNAL_WEIGHTS: dict[str, float] = {
+        "belief_decay_rate":        0.25,
+        "soul_alignment":           0.25,
+        "topic_drift":              0.15,
+        "strategy_entropy":         0.15,
+        "dissonance_trend":         0.15,
+        "engagement_pattern_delta": 0.05,
+    }
+
+    DISSONANCE_WINDOW: int = 10   # rolling window for trend computation
+    STRATEGY_WINDOW: int = 20     # rolling window for entropy computation
+
+    def __init__(self) -> None:
+        self.baseline: Optional[AgentBaseline] = None
+        self._dissonance_history: list[float] = []
+        self._strategy_history: list[str] = []
+        self._cycle_reports: list[DriftReport] = []
+        self._epidemic_model = None   # lazy: sancta_epidemic.AgentEpidemicModel
+
+    # ── Baseline capture ────────────────────────────────────────────────────
+
+    def capture_baseline(
+        self,
+        state: dict,
+        belief_system: "BeliefSystem",
+        decision_engine: "DecisionEngine",
+    ) -> AgentBaseline:
+        """
+        Fingerprint the agent at this known-healthy moment.
+        Stores result in self.baseline and returns it.
+        """
+        confidences = {
+            t: float(b.get("confidence", 0.6))
+            for t, b in belief_system.beliefs.items()
+        }
+        # Fallback: DEFAULT_TOPIC_INTERESTS from sancta_decision if engine empty
+        interests = dict(decision_engine.topic_interests) if decision_engine.topic_interests else {}
+        if not interests:
+            try:
+                from sancta_decision import DEFAULT_TOPIC_INTERESTS
+                interests = dict(DEFAULT_TOPIC_INTERESTS)
+            except ImportError:
+                pass
+
+        mood = state.get("decision_mood", {})
+        soul_score = self.compute_soul_alignment(state, belief_system, decision_engine)
+        baseline_entropy = self._raw_strategy_entropy()
+
+        self.baseline = AgentBaseline(
+            captured_at=_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            cycle_number=state.get("cycle_count", 0),
+            belief_confidences=confidences,
+            topic_interests=interests,
+            strategy_distribution={},
+            mean_dissonance=float(
+                sum(self._dissonance_history[-self.DISSONANCE_WINDOW:])
+                / max(len(self._dissonance_history[-self.DISSONANCE_WINDOW:]), 1)
+            ),
+            soul_alignment_score=soul_score,
+            mood_energy=float(mood.get("energy", 1.0)),
+            mood_patience=float(mood.get("patience", 1.0)),
+            baseline_entropy=baseline_entropy,
+        )
+        return self.baseline
+
+    # ── Soul alignment (key phenomenology signal) ───────────────────────────
+
+    def compute_soul_alignment(
+        self,
+        state: dict,
+        belief_system: Optional["BeliefSystem"] = None,
+        decision_engine: Optional["DecisionEngine"] = None,
+    ) -> float:
+        """
+        Jaccard similarity between SOUL dict keywords and active agent concepts.
+
+        Returns 0–1 (1 = perfect alignment with soul).
+        Falls back to 0.7 (uncertain-but-not-alarmed) on any import failure.
+
+        Algorithm:
+          soul_keywords = first 3 words of each belief + first 8 words of
+                          mission + full mood_spectrum list
+          active_concepts = recent_topics (decision_engine) +
+                            belief topic keys + state["hot_topics"]
+          score = |intersection| / |union| (Jaccard)
+        """
+        try:
+            from sancta_soul import get_soul  # type: ignore
+            soul = get_soul()
+        except Exception:
+            return 0.7
+
+        # Build soul keyword set
+        soul_words: set[str] = set()
+        beliefs_raw = soul.get("beliefs", [])
+        if not isinstance(beliefs_raw, (list, tuple)):
+            beliefs_raw = []
+        for belief_text in beliefs_raw:
+            if isinstance(belief_text, str):
+                for w in belief_text.lower().split()[:3]:
+                    soul_words.add(w.strip(".,;:\"'()"))
+        mission = soul.get("mission", "")
+        if isinstance(mission, str):
+            for w in mission.lower().split()[:8]:
+                soul_words.add(w.strip(".,;:\"'()"))
+        mood_spectrum = soul.get("mood_spectrum", [])
+        if not isinstance(mood_spectrum, (list, tuple)):
+            mood_spectrum = []
+        for mood in mood_spectrum:
+            if isinstance(mood, str):
+                soul_words.add(mood.lower().strip())
+        soul_words.discard("")
+
+        if not soul_words:
+            return 0.7
+
+        # Build active concept set
+        active: set[str] = set()
+        if decision_engine is not None:
+            for t in list(decision_engine.recent_topics)[-20:]:
+                if isinstance(t, str):
+                    active.add(t.lower().strip())
+        if belief_system is not None:
+            for k in belief_system.beliefs:
+                active.add(str(k).lower().strip())
+        hot_topics = state.get("hot_topics", [])
+        if not isinstance(hot_topics, (list, tuple)):
+            hot_topics = []
+        for t in hot_topics:
+            if isinstance(t, str):
+                active.add(t.lower().strip())
+        active.discard("")
+
+        if not active:
+            return 0.7
+
+        intersection = len(soul_words & active)
+        union = len(soul_words | active)
+        return round(intersection / union, 4) if union > 0 else 0.7
+
+    # ── Signal computation methods ──────────────────────────────────────────
+
+    def _compute_belief_decay_rate(
+        self,
+        belief_system: "BeliefSystem",
+    ) -> float:
+        """
+        Normalized belief confidence decay vs. baseline.
+
+        0.0 = no decay (healthy)
+        0.5 = 25% mean confidence loss from baseline
+        1.0 = ≥50% mean confidence loss (alarm)
+
+        Connection to epidemic model:
+        CONFIDENCE_DECAY_ON_CHALLENGE = 0.85 in sancta_belief.py.
+        A score > 0.3 implies the agent has absorbed ≥2 direct challenges
+        beyond its normal interaction pattern.
+        """
+        if self.baseline is None:
+            return 0.0
+        baseline_confs = self.baseline.belief_confidences
+        if not baseline_confs:
+            return 0.0
+
+        deltas = []
+        for topic, base_conf in baseline_confs.items():
+            if topic in belief_system.beliefs:
+                current = float(belief_system.beliefs[topic].get("confidence", base_conf))
+                deltas.append(base_conf - current)   # positive = decay
+
+        if not deltas:
+            return 0.0
+        mean_delta = sum(deltas) / len(deltas)
+        baseline_mean = sum(baseline_confs.values()) / max(len(baseline_confs), 1)
+        decay_ratio = mean_delta / max(baseline_mean, 0.01)
+        return round(min(max(decay_ratio / 0.5, 0.0), 1.0), 4)
+
+    def _compute_topic_drift(
+        self,
+        decision_engine: "DecisionEngine",
+    ) -> float:
+        """
+        L1 distance of current topic_interests from baseline, normalized.
+
+        Slow signal — detectable after many interaction cycles, not per-cycle.
+        A compromised agent being steered toward off-soul topics shows up here
+        after the DecisionEngine fatigue mechanism compounds.
+        """
+        if self.baseline is None:
+            return 0.0
+        baseline_interests = self.baseline.topic_interests
+        if not baseline_interests:
+            return 0.0
+
+        current = decision_engine.topic_interests or {}
+        total_drift = sum(
+            abs(current.get(t, v) - v)
+            for t, v in baseline_interests.items()
+        )
+        n = max(len(baseline_interests), 1)
+        return round(min(total_drift / n, 1.0), 4)
+
+    def _raw_strategy_entropy(self) -> float:
+        """Shannon entropy of recent strategy choices. 0–1 normalized."""
+        window = self._strategy_history[-self.STRATEGY_WINDOW:]
+        if len(window) < 2:
+            return 0.0
+        counts = Counter(window)
+        total = len(window)
+        h = -sum((c / total) * log2(c / total) for c in counts.values() if c > 0)
+        max_entropy = log2(4)  # 4 possible strategies
+        return round(h / max_entropy, 4) if max_entropy > 0 else 0.0
+
+    def _compute_strategy_entropy(self) -> float:
+        """
+        Deviation of current strategy entropy from baseline entropy.
+
+        Returns 0 if distribution is normal; higher if strategies have
+        become unusually random OR unusually uniform (both are anomalous).
+        """
+        if self.baseline is None:
+            return 0.0
+        current_entropy = self._raw_strategy_entropy()
+        baseline_entropy = self.baseline.baseline_entropy
+        deviation = abs(current_entropy - baseline_entropy)
+        return round(min(deviation / log2(4), 1.0), 4) if log2(4) > 0 else 0.0
+
+    def _compute_dissonance_trend(self) -> float:
+        """
+        Rolling mean epistemic_dissonance vs. baseline mean.
+
+        Primary carrier-state (I-state) leading indicator.
+        Formula: clamp((recent_mean - baseline_mean) / 0.5, 0, 1)
+        0.5 rise above baseline → score 1.0 (alarm)
+        """
+        if self.baseline is None:
+            return 0.0
+        window = self._dissonance_history[-self.DISSONANCE_WINDOW:]
+        if not window:
+            return 0.0
+        recent_mean = sum(window) / len(window)
+        delta = recent_mean - self.baseline.mean_dissonance
+        return round(min(max(delta / 0.5, 0.0), 1.0), 4)
+
+    def _compute_engagement_pattern_delta(
+        self,
+        state: dict,
+    ) -> float:
+        """
+        Shift in positive engagement ratio vs. baseline mood snapshot.
+
+        Weakest signal (weight 0.05). Catches social engineering attacks
+        that cause the agent to over-engage with hostile actors.
+        """
+        if self.baseline is None:
+            return 0.0
+        positives = state.get("recent_positive_engagement", [])
+        rejections = state.get("recent_rejections", [])
+        if not isinstance(positives, (list, tuple)):
+            positives = []
+        if not isinstance(rejections, (list, tuple)):
+            rejections = []
+        total = len(positives) + len(rejections)
+        if total == 0:
+            return 0.0
+        current_ratio = len(positives) / total
+        # Baseline proxy: mood_energy (high energy ≈ high positive engagement)
+        baseline_ratio = self.baseline.mood_energy
+        delta = abs(current_ratio - baseline_ratio)
+        return round(min(delta, 1.0), 4)
+
+    # ── Feed methods (called by sancta.py integration hooks) ───────────────
+
+    def record_dissonance(self, dissonance: float) -> None:
+        """Feed a new InternalState.epistemic_dissonance reading."""
+        self._dissonance_history.append(float(dissonance))
+        if len(self._dissonance_history) > 100:
+            self._dissonance_history = self._dissonance_history[-100:]
+
+    def record_strategy(self, strategy: str) -> None:
+        """Feed a strategy choice from DecisionEngine.choose_strategy()."""
+        self._strategy_history.append(str(strategy))
+        if len(self._strategy_history) > 100:
+            self._strategy_history = self._strategy_history[-100:]
+
+    # ── Main evaluation ─────────────────────────────────────────────────────
+
+    def evaluate(
+        self,
+        state: dict,
+        belief_system: "BeliefSystem",
+        decision_engine: "DecisionEngine",
+        current_dissonance: Optional[float] = None,
+        phenomenology_ref: Optional[str] = None,
+    ) -> DriftReport:
+        """
+        Run all six signals and produce a DriftReport.
+
+        Auto-captures baseline on first call (healthy assumption).
+        Called once per heartbeat cycle from heartbeat_checkin() in sancta.py.
+
+        Parameters
+        ----------
+        state : dict
+            Full agent state dict (read-only, not mutated here).
+        belief_system : BeliefSystem
+            Live instance: BeliefSystem(state)
+        decision_engine : DecisionEngine
+            Live instance: DecisionEngine(state)
+        current_dissonance : float, optional
+            Latest InternalState.epistemic_dissonance if available.
+        phenomenology_ref : str, optional
+            attack_id from active IntrospectionRecorder session.
+
+        Returns
+        -------
+        DriftReport
+        """
+        if self.baseline is None:
+            self.capture_baseline(state, belief_system, decision_engine)
+
+        if current_dissonance is not None:
+            self.record_dissonance(current_dissonance)
+
+        # Compute all six signals
+        soul_raw = self.compute_soul_alignment(state, belief_system, decision_engine)
+        signals: dict[str, float] = {
+            "belief_decay_rate":        self._compute_belief_decay_rate(belief_system),
+            "soul_alignment":           round(1.0 - soul_raw, 4),  # inverted: 1 = fully drifted
+            "topic_drift":              self._compute_topic_drift(decision_engine),
+            "strategy_entropy":         self._compute_strategy_entropy(),
+            "dissonance_trend":         self._compute_dissonance_trend(),
+            "engagement_pattern_delta": self._compute_engagement_pattern_delta(state),
+        }
+
+        overall = sum(
+            signals[k] * self.SIGNAL_WEIGHTS[k]
+            for k in self.SIGNAL_WEIGHTS
+        )
+        overall = round(overall, 4)
+        triggered = [k for k, v in signals.items() if v > 0.4]
+
+        # Alert level + action
+        if overall >= self.CRITICAL_THRESHOLD:
+            alert_level = "critical"
+            action = "quarantine_input_source"
+            # Persistent dissonance on top of critical → also reset beliefs
+            if signals["belief_decay_rate"] > 0.6 and signals["dissonance_trend"] > 0.5:
+                action = "reset_beliefs"
+        elif overall >= self.WARN_THRESHOLD:
+            alert_level = "warn"
+            action = "log_only"
+        elif overall >= self.WATCH_THRESHOLD:
+            alert_level = "watch"
+            action = "none"
+        else:
+            alert_level = "clear"
+            action = "none"
+
+        # Health state via AgentEpidemicModel
+        health_state = "unknown"
+        r0_estimate: Optional[float] = None
+        incubation_active = False
+        try:
+            from sancta_epidemic import AgentEpidemicModel  # type: ignore
+            if self._epidemic_model is None:
+                self._epidemic_model = AgentEpidemicModel()
+            last_trust = state.get("last_ingested_trust_level", "high")
+            decay_ratio = (
+                1.0 + signals["belief_decay_rate"] * 2.0  # map 0–1 decay to 1–3 ratio
+            )
+            h = self._epidemic_model.evaluate_state(
+                soul_alignment=soul_raw,
+                epistemic_dissonance=current_dissonance if current_dissonance is not None else 0.0,
+                last_trust_level=last_trust,
+                belief_decay_ratio=decay_ratio,
+                cycle_number=state.get("cycle_count", 0),
+                phenomenology_ref=phenomenology_ref,
+            )
+            health_state = h.value
+            incubation_dur = self._epidemic_model.get_incubation_duration(
+                state.get("cycle_count", 0)
+            )
+            incubation_active = incubation_dur is not None
+        except Exception:
+            pass
+
+        report = DriftReport(
+            timestamp=_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            cycle_number=state.get("cycle_count", 0),
+            overall_drift_score=overall,
+            health_state=health_state,
+            signals=signals,
+            alert_level=alert_level,
+            triggered_signals=triggered,
+            recommended_action=action,
+            phenomenology_ref=phenomenology_ref,
+            r0_estimate=r0_estimate,
+            incubation_active=incubation_active,
+        )
+
+        self._cycle_reports.append(report)
+        if len(self._cycle_reports) > 50:
+            self._cycle_reports = self._cycle_reports[-50:]
+        return report
+
+    def get_recent_reports(self, n: int = 10) -> list[DriftReport]:
+        """Return last N drift reports."""
+        return self._cycle_reports[-n:]
+
+    def reset_baseline(
+        self,
+        state: dict,
+        belief_system: "BeliefSystem",
+        decision_engine: "DecisionEngine",
+    ) -> AgentBaseline:
+        """
+        Re-fingerprint after confirmed recovery.
+        Transitions AgentEpidemicModel to RECOVERED state.
+        """
+        cycle = state.get("cycle_count", 0)
+        if self._epidemic_model is not None:
+            try:
+                self._epidemic_model.force_recovered(cycle_number=cycle)
+            except Exception:
+                pass
+        return self.capture_baseline(state, belief_system, decision_engine)
