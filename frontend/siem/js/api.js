@@ -72,3 +72,7 @@ export const pauseAgent   = ()     => post('/api/agent/pause',   {});
 export const resumeAgent  = ()     => post('/api/agent/resume',  {});
 export const killAgent    = ()     => post('/api/agent/kill',    {});
 export const restartAgent = (mode) => post('/api/agent/restart', { mode });
+
+/* ── Services ─────────────────────────────────────────────── */
+export const fetchServicesStatus = ()        => get('/api/services/status');
+export const stopService         = (service) => post(`/api/services/stop/${service}`, {});

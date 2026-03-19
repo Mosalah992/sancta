@@ -177,3 +177,104 @@ input:focus, textarea:focus {
 .epid-score-num { text-shadow: 0 0 16px rgba(0,255,242,.4); transition: color 400ms; }
 .epid-score-num.score-high { color: var(--amber); text-shadow: 0 0 16px rgba(255,184,0,.5); }
 .epid-score-num.score-crit { color: var(--red);   text-shadow: 0 0 16px rgba(255,23,68,.5); }
+
+/* ── Control tab: LED indicators ─────────────────────────── */
+.ctrl-led {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-right: 6px;
+}
+.ctrl-led-on    { background: var(--green); box-shadow: 0 0 6px rgba(57,255,20,.7); animation: online-pulse 2.5s ease-in-out infinite; }
+.ctrl-led-off   { background: #2a2a3a; }
+.ctrl-led-pause { background: var(--amber); box-shadow: 0 0 6px rgba(255,184,0,.6); }
+
+/* ── Control tab: process matrix rows ────────────────────── */
+.ctrl-proc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  font-family: var(--font-terminal);
+  font-size: 12px;
+}
+.ctrl-proc-row:last-child { border-bottom: none; }
+.ctrl-svc-name    { color: var(--text-primary); min-width: 150px; }
+.ctrl-svc-pid     { color: var(--text-muted); min-width: 80px; font-size: 11px; }
+.ctrl-svc-state   { min-width: 72px; font-size: 11px; font-weight: 600; }
+.ctrl-svc-online  { color: var(--green); }
+.ctrl-svc-offline { color: var(--text-ghost); }
+.ctrl-svc-paused  { color: var(--amber); }
+.ctrl-svc-btns    { display: flex; gap: 4px; margin-left: auto; }
+
+/* ── Control tab: xs action buttons ──────────────────────── */
+.btn-xs {
+  padding: 2px 8px;
+  font-size: 10px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 3px;
+  background: rgba(255,255,255,.04);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 120ms ease;
+  font-family: var(--font-terminal);
+}
+.btn-xs:hover:not(:disabled)         { border-color: var(--cyan); color: var(--cyan); background: rgba(0,255,242,.06); }
+.btn-xs-danger:hover:not(:disabled)  { border-color: var(--red);  color: var(--red);  background: rgba(255,23,68,.06); }
+
+/* ── Control tab: log header layout ──────────────────────── */
+.ctrl-log-header { flex-wrap: wrap; gap: 6px; }
+
+/* ── Control tab: log source tabs ────────────────────────── */
+.ctrl-log-tabs { display: flex; gap: 2px; }
+.ctrl-log-tab {
+  padding: 2px 8px;
+  font-size: 10px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-terminal);
+  transition: all 120ms ease;
+}
+.ctrl-log-tab.active,
+.ctrl-log-tab:hover { border-color: var(--cyan); color: var(--cyan); background: rgba(0,255,242,.06); }
+
+/* ── Control tab: level select (compact) ─────────────────── */
+.ctrl-select-sm {
+  padding: 2px 4px;
+  font-size: 10px;
+  height: auto;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-family: var(--font-terminal);
+  cursor: pointer;
+}
+.ctrl-select-sm:focus { border-color: var(--cyan); outline: none; }
+
+/* ── Control tab: search input ───────────────────────────── */
+.ctrl-search {
+  padding: 2px 8px;
+  font-size: 11px;
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-family: var(--font-terminal);
+  width: 120px;
+  transition: border-color 150ms ease;
+}
+.ctrl-search:focus { border-color: var(--cyan); outline: none; }
+.ctrl-search::placeholder { color: var(--text-ghost); }
+
+/* ── Control tab: log entry metadata ─────────────────────── */
+.ctrl-log-ts  { color: var(--text-ghost); font-size: 10px; min-width: 64px; display: inline-block; }
+.ctrl-log-src { font-size: 10px; font-weight: 600; margin: 0 6px; }
+
+/* ── Paused state color ───────────────────────────────────── */
+.pv-paused { color: var(--amber) !important; animation: none !important; }

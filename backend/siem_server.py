@@ -1705,6 +1705,139 @@ async def ws_live(ws: WebSocket) -> None:
         return
 
 
+# ── Services Status & Per-Process Control ─────────────────────────────────
+
+def _check_ollama_running() -> bool:
+    """Quick TCP connect to see if Ollama is listening on port 11434."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", 11434), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
+
+def _find_process_by_script(script_name: str) -> int | None:
+    """Return PID of a running Python process whose cmdline contains script_name."""
+    if psutil is not None:
+        try:
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    cmdline = proc.info.get("cmdline") or []
+                    if any(script_name in arg for arg in cmdline):
+                        return proc.info["pid"]
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            pass
+        return None
+    # Fallback: PowerShell on Windows, pgrep on Unix
+    if os.name == "nt":
+        try:
+            r = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+                    "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+                ],
+                capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="ignore",
+            )
+            import json as _json
+            procs = _json.loads(r.stdout.strip() or "[]")
+            if isinstance(procs, dict):
+                procs = [procs]
+            for p in procs:
+                if script_name in (p.get("CommandLine") or ""):
+                    pid = p.get("ProcessId")
+                    return int(pid) if pid else None
+        except Exception:
+            pass
+    else:
+        try:
+            r = subprocess.run(
+                ["pgrep", "-f", script_name],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                parts = r.stdout.strip().split()
+                return int(parts[0]) if parts else None
+        except Exception:
+            pass
+    return None
+
+
+@app.get("/api/services/status")
+def api_services_status(_: None = Depends(_require_auth)) -> dict[str, Any]:
+    """Live status of all Sancta subsystem processes."""
+    agent = _agent_status()
+    curiosity_pid = _find_process_by_script("curiosity_run.py")
+    ollama_up = _check_ollama_running()
+    return {
+        "ok": True,
+        "services": {
+            "sancta": {
+                "name": "Sancta Agent",
+                "running": agent.get("running", False),
+                "suspended": agent.get("suspended", False),
+                "pid": agent.get("pid"),
+                "stoppable": True,
+                "pauseable": True,
+            },
+            "curiosity": {
+                "name": "Curiosity Pipeline",
+                "running": curiosity_pid is not None,
+                "suspended": False,
+                "pid": curiosity_pid,
+                "stoppable": True,
+                "pauseable": False,
+            },
+            "ollama": {
+                "name": "Ollama LLM",
+                "running": ollama_up,
+                "suspended": False,
+                "pid": None,
+                "stoppable": False,
+                "pauseable": False,
+            },
+            "siem": {
+                "name": "SIEM Server",
+                "running": True,
+                "suspended": False,
+                "pid": os.getpid(),
+                "stoppable": False,
+                "pauseable": False,
+            },
+        },
+    }
+
+
+@app.post("/api/services/stop/{service}")
+def api_services_stop(
+    service: str,
+    _: None = Depends(_require_auth),
+) -> dict[str, Any]:
+    """Stop a specific named service (sancta or curiosity)."""
+    if service == "sancta":
+        return _kill_agent()
+    if service == "curiosity":
+        pid = _find_process_by_script("curiosity_run.py")
+        if not pid:
+            return {"ok": False, "error": "Curiosity pipeline is not running"}
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                os.kill(pid, signal.SIGTERM)
+            return {"ok": True, "pid": pid}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:200]}
+    return {"ok": False, "error": f"Unknown or non-stoppable service: {service}"}
+
+
 def main() -> None:
     import uvicorn
 
